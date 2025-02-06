@@ -1014,13 +1014,13 @@ def display_evaluation(evaluation: Dict[str, Any]):
             recommendations = evaluation.get("recommendations", {})
             
             # Geography Fit with improved formatting
-            st.subheader("🌍 Geography Fit")
-            geography_fit = recommendations.get("geographyFit", "Not specified")
-            if isinstance(geography_fit, dict):
-                for region, fit in geography_fit.items():
-                    st.write(f"**{region}:** {fit}")
-            else:
-                st.write(geography_fit)
+            # st.subheader("🌍 Geography Fit")
+            # geography_fit = recommendations.get("geographyFit", "Not specified")
+            # if isinstance(geography_fit, dict):
+            #     for region, fit in geography_fit.items():
+            #         st.write(f"**{region}:** {fit}")
+            # else:
+            #     st.write(geography_fit)
             
             # Improvements Needed with better formatting
             st.subheader("💡 Suggested Improvements")
