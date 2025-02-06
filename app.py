@@ -1014,31 +1014,35 @@ def display_evaluation(evaluation: Dict[str, Any]):
             recommendations = evaluation.get("recommendations", {})
             
             # Geography Fit with improved formatting
-            # st.subheader("🌍 Geography Fit")
-            # geography_fit = recommendations.get("geographyFit", "Not specified")
-            # if isinstance(geography_fit, dict):
-            #     for region, fit in geography_fit.items():
-            #         st.write(f"**{region}:** {fit}")
-            # else:
-            #     st.write(geography_fit)
+            st.subheader("🌍 Geography Fit")
+            geography_fit = recommendations.get("geographyFit", "Not specified")
+            st.write(geography_fit)
             
             # Improvements Needed with better formatting
             st.subheader("💡 Suggested Improvements")
-            improvements = recommendations.get("improvements", ["No specific improvements listed"])
+            improvements = recommendations.get("improvements", [])
             if isinstance(improvements, list):
-                for i, improvement in enumerate(improvements, 1):
-                    st.write(f"{i}. {improvement}")
-            else:
-                st.write(improvements)
+                for improvement in improvements:
+                    if isinstance(improvement, dict):
+                        st.markdown(f"""
+                        **{improvement.get('aspect', 'General')}**  
+                        {improvement.get('recommendation', '')}
+                        """)
+                    else:
+                        st.write(f"• {improvement}")
             
             # Rigor Assessment with enhanced display
             st.subheader("📊 Rigor Assessment")
-            rigor = recommendations.get("rigor", "Not specified")
-            if isinstance(rigor, dict):
-                for category, assessment in rigor.items():
-                    st.write(f"**{category}:** {assessment}")
-            else:
-                st.write(rigor)
+            rigor = recommendations.get("rigor", {})
+            for category, assessment in rigor.items():
+                if isinstance(assessment, dict):
+                    st.markdown(f"""
+                    **{category.title()}**  
+                    Score: {'Pass' if assessment.get('score') == 1 else 'Needs Improvement'}  
+                    {assessment.get('justification', '')}
+                    """)
+                else:
+                    st.write(f"**{category.title()}:** {assessment}")
             
             # Add visual separator
             st.markdown("---")
