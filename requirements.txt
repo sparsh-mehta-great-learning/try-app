@@ -13,3 +13,5 @@ python-dotenv==1.0.0
 ffmpeg-python
 faster-whisper
 soundfile
+reportlab
+pandas
