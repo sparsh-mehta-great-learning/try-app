@@ -233,74 +233,188 @@ class ContentAnalyzer:
                     progress_callback(0.2, "Preparing content analysis...")
                 
                 prompt = self._create_analysis_prompt(transcript)
+                logger.info(f"Attempt {attempt + 1}: Sending analysis request")
+                logger.info(f"Transcript length: {len(transcript)} characters")
                 
                 if progress_callback:
                     progress_callback(0.5, "Processing with AI model...")
                 
-                response = self.client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": "You are a teaching expert providing a structured JSON analysis. Always respond with a valid JSON object containing scores and detailed citations."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    response_format={"type": "json_object"}
-                )
+                try:
+                    response = self.client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": """You are a teaching expert providing a structured analysis. 
+                             Analyze the teaching content and provide a detailed assessment in the following format:
+                             
+                             Concept Assessment:
+                             - Subject Matter Accuracy (Score: 0/1, Citations with timestamps)
+                             - First Principles Approach (Score: 0/1, Citations with timestamps)
+                             - Examples and Business Context (Score: 0/1, Citations with timestamps)
+                             - Cohesive Storytelling (Score: 0/1, Citations with timestamps)
+                             - Engagement and Interaction (Score: 0/1, Citations with timestamps)
+                             - Professional Tone (Score: 0/1, Citations with timestamps)
+                             
+                             Code Assessment:
+                             - Depth of Explanation (Score: 0/1, Citations with timestamps)
+                             - Output Interpretation (Score: 0/1, Citations with timestamps)
+                             - Breaking down Complexity (Score: 0/1, Citations with timestamps)
+                             
+                             Always respond with valid JSON containing these exact categories."""},
+                            {"role": "user", "content": prompt}
+                        ],
+                        response_format={"type": "json_object"}
+                    )
+                    logger.info("API call successful")
+                except Exception as api_error:
+                    logger.error(f"API call failed: {str(api_error)}")
+                    raise
                 
                 result_text = response.choices[0].message.content.strip()
+                logger.info(f"Raw API response: {result_text[:500]}...")
                 
                 try:
                     result = json.loads(result_text)
-                    # Ensure default structure with meaningful content
-                    default_structure = {
-                        "score": 0,
-                        "citations": ["No specific citations available"]
+                    logger.info("Successfully parsed JSON response")
+                    
+                    # Validate the response structure
+                    required_categories = {
+                        "Concept Assessment": [
+                            "Subject Matter Accuracy",
+                            "First Principles Approach",
+                            "Examples and Business Context",
+                            "Cohesive Storytelling",
+                            "Engagement and Interaction",
+                            "Professional Tone"
+                        ],
+                        "Code Assessment": [
+                            "Depth of Explanation",
+                            "Output Interpretation",
+                            "Breaking down Complexity"
+                        ]
                     }
                     
-                    for category in ["subjectMatterAccuracy", "firstPrinciplesApproach", 
-                                   "examplesAndContext", "cohesiveStorytelling", 
-                                   "engagement", "professionalTone"]:
+                    # Check if response has required structure
+                    for category, subcategories in required_categories.items():
                         if category not in result:
-                            result[category] = default_structure.copy()
-                        elif not isinstance(result[category], dict):
-                            result[category] = default_structure.copy()
-                        else:
-                            # Ensure required fields exist
-                            if "score" not in result[category]:
-                                result[category]["score"] = 0
-                            if "citations" not in result[category]:
-                                result[category]["citations"] = ["No specific citations available"]
-                
+                            logger.error(f"Missing category: {category}")
+                            raise ValueError(f"Response missing required category: {category}")
+                        
+                        for subcategory in subcategories:
+                            if subcategory not in result[category]:
+                                logger.error(f"Missing subcategory: {subcategory} in {category}")
+                                raise ValueError(f"Response missing required subcategory: {subcategory}")
+                            
+                            subcat_data = result[category][subcategory]
+                            if not isinstance(subcat_data, dict):
+                                logger.error(f"Invalid format for {category}.{subcategory}")
+                                raise ValueError(f"Invalid format for {category}.{subcategory}")
+                            
+                            if "Score" not in subcat_data or "Citations" not in subcat_data:
+                                logger.error(f"Missing Score or Citations in {category}.{subcategory}")
+                                raise ValueError(f"Missing Score or Citations in {category}.{subcategory}")
+                    
                     return result
                     
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as json_error:
+                    logger.error(f"JSON parsing error: {str(json_error)}")
                     logger.error(f"Invalid JSON response: {result_text}")
+                    raise
+                except ValueError as val_error:
+                    logger.error(f"Validation error: {str(val_error)}")
                     raise
                 
             except Exception as e:
-                logger.error(f"Content analysis attempt {attempt + 1} failed: {e}")
+                logger.error(f"Content analysis attempt {attempt + 1} failed: {str(e)}")
                 if attempt == self.retry_count - 1:
-                    raise
+                    logger.error("All attempts failed, returning default structure")
+                    return {
+                        "Concept Assessment": {
+                            "Subject Matter Accuracy": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "First Principles Approach": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "Examples and Business Context": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "Cohesive Storytelling": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "Engagement and Interaction": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "Professional Tone": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]}
+                        },
+                        "Code Assessment": {
+                            "Depth of Explanation": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "Output Interpretation": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]},
+                            "Breaking down Complexity": {"Score": 0, "Citations": [f"Analysis failed: {str(e)}"]}
+                        }
+                    }
                 time.sleep(self.retry_delay * (2 ** attempt))
-    
+
     def _create_analysis_prompt(self, transcript: str) -> str:
         """Create the analysis prompt"""
-        return f"""Analyze this teaching content and provide scores and citations:
+        prompt_template = """Analyze this teaching content and provide detailed assessment with timestamps:
+
 Transcript: {transcript}
-For each category below, provide:
-1. Score (0 or 1)
-2. Supporting citations with timestamps (if score is 0, cite problematic areas)
-Concept Assessment:
-1. Subject Matter Accuracy
-2. First Principles Approach
-3. Examples and Business Context
-4. Cohesive Storytelling
-5. Engagement and Interaction
-6. Professional Tone
-Code Assessment:
-1. Depth of Explanation
-2. Output Interpretation
-3. Breaking down Complexity
-Format as JSON."""
+
+Provide a detailed assessment in JSON format with scores (0 or 1) and timestamped citations for each category.
+If score is 0, citations should point out problems. If score is 1, citations should highlight good examples.
+
+Required JSON structure:
+{{
+    "Concept Assessment": {{
+        "Subject Matter Accuracy": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "First Principles Approach": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "Examples and Business Context": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "Cohesive Storytelling": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "Engagement and Interaction": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "Professional Tone": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }}
+    }},
+    "Code Assessment": {{
+        "Depth of Explanation": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "Output Interpretation": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }},
+        "Breaking down Complexity": {{
+            "Score": 1,
+            "Citations": ["[MM:SS] Example citation"]
+        }}
+    }}
+}}
+
+Evaluation Criteria:
+- Subject Matter Accuracy: Check for factual errors or incorrect correlations
+- First Principles Approach: Evaluate if fundamentals are explained before technical terms
+- Examples and Business Context: Look for real-world examples
+- Cohesive Storytelling: Check for logical flow between topics
+- Engagement and Interaction: Evaluate use of questions and engagement techniques
+- Professional Tone: Assess language and delivery professionalism
+- Depth of Explanation: Evaluate technical explanations
+- Output Interpretation: Check if code outputs are explained clearly
+- Breaking down Complexity: Assess ability to simplify complex concepts
+
+Important:
+- Include timestamps in [MM:SS] format
+- Provide specific citations from the transcript
+- Use only Score values of 0 or 1
+- Include at least one citation for each category"""
+
+        return prompt_template.format(transcript=transcript)
 
     def _evaluate_speech_metrics(self, transcript: str, audio_features: Dict[str, float], 
                            progress_callback=None) -> Dict[str, Any]:
@@ -313,58 +427,54 @@ Format as JSON."""
             words = len(transcript.split())
             duration_minutes = audio_features.get('duration', 0) / 60
             
-            # Calculate words per minute with minimum threshold
+            # Calculate words per minute with updated range (130-160 WPM is ideal for teaching)
             words_per_minute = max(words / duration_minutes if duration_minutes > 0 else 0, 1)
             
-            # Improved filler word detection
+            # Improved filler word detection (2-3 per minute is acceptable)
             filler_words = re.findall(r'\b(um|uh|like|you\s+know|basically|actually|literally)\b', 
                                     transcript.lower())
             fillers_count = len(filler_words)
-            
-            # Calculate fillers per minute with minimum threshold
             fillers_per_minute = max(fillers_count / duration_minutes if duration_minutes > 0 else 0, 0.1)
             
-            # Improved error detection
+            # Improved error detection (1-2 per minute is acceptable)
             repeated_words = len(re.findall(r'\b(\w+)\s+\1\b', transcript.lower()))
             incomplete_sentences = len(re.findall(r'[a-zA-Z]+\s*\.\.\.|\b[a-zA-Z]+\s*-\s+', transcript))
             errors_count = repeated_words + incomplete_sentences
-            
-            # Calculate errors per minute with minimum threshold
             errors_per_minute = max(errors_count / duration_minutes if duration_minutes > 0 else 0, 0.1)
             
-            # Ensure mean amplitude is properly scaled and evaluated
+            # Ensure mean amplitude is properly scaled (60-75 dB is ideal for teaching)
             mean_amplitude = float(audio_features.get("mean_amplitude", 0))
             
-            # Updated acceptable ranges based on research and best practices
             return {
                 "speed": {
-                    "score": 1 if 130 <= words_per_minute <= 150 else 0,  # Narrowed optimal teaching range
+                    "score": 1 if 120 <= words_per_minute <= 180 else 0,  # Updated WPM range for teaching
                     "wpm": float(words_per_minute),
                     "total_words": int(words),
                     "duration_minutes": float(duration_minutes)
                 },
                 "fluency": {
-                    "score": 1 if fillers_per_minute <= 3 and errors_per_minute <= 2 else 0,  # Stricter fluency standards
+                    "score": 1 if errors_per_minute <= 2 and fillers_per_minute <= 3 else 0,  # Updated thresholds
                     "fillersPerMin": float(fillers_per_minute),
                     "errorsPerMin": float(errors_per_minute)
                 },
                 "flow": {
-                    "score": 1 if 8 <= float(audio_features.get("pauses_per_minute", 0)) <= 12 else 0,  # Adjusted for teaching pace
+                    "score": 1 if float(audio_features.get("pauses_per_minute", 0)) <= 12 else 0,  # Updated pause threshold
                     "pausesPerMin": float(audio_features.get("pauses_per_minute", 0))
                 },
                 "intonation": {
                     "pitch": float(audio_features.get("pitch_mean", 0)),
-                    "pitchScore": 1 if 80 <= float(audio_features.get("pitch_std", 0)) <= 90 else 0,  # Refined pitch variation range
+                    "pitchScore": 1 if 20 <= float(audio_features.get("pitch_std", 0)) / float(audio_features.get("pitch_mean", 1)) * 100 <= 40 else 0,  # Updated pitch variation range
                     "pitchVariation": float(audio_features.get("pitch_std", 0)),
-                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 8 else 0,  # Increased minimum variations
+                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 8 else 0,  # Updated minimum variations
                     "risingPatterns": int(audio_features.get("rising_patterns", 0)),
                     "fallingPatterns": int(audio_features.get("falling_patterns", 0)),
                     "variationsPerMin": float(audio_features.get("variations_per_minute", 0))
                 },
                 "energy": {
-                    "score": 1 if 20 <= mean_amplitude <= 40 else 0,  # Adjusted amplitude range for clearer speech
+                    "score": 1 if 60 <= mean_amplitude <= 75 else 0,  # Updated amplitude range for teaching
                     "meanAmplitude": mean_amplitude,
-                    "amplitudeDeviation": float(audio_features.get("amplitude_deviation", 0))
+                    "amplitudeDeviation": float(audio_features.get("amplitude_deviation", 0)),
+                    "variationScore": 1 if 0.05 <= float(audio_features.get("amplitude_deviation", 0)) <= 0.15 else 0  # Updated amplitude variation range
                 }
             }
 
@@ -418,7 +528,8 @@ class RecommendationGenerator:
                         "improvements": [
                             "Unable to generate specific recommendations"
                         ],
-                        "rigor": "Undetermined"
+                        "rigor": "Undetermined",
+                        "profileMatches": []
                     }
                 
                 if progress_callback:
@@ -435,7 +546,8 @@ class RecommendationGenerator:
                         "improvements": [
                             "Unable to generate specific recommendations"
                         ],
-                        "rigor": "Undetermined"
+                        "rigor": "Undetermined",
+                        "profileMatches": []
                     }
                 time.sleep(self.retry_delay * (2 ** attempt))
     
@@ -444,10 +556,80 @@ class RecommendationGenerator:
         return f"""Based on the following metrics and analysis, provide recommendations:
 Metrics: {json.dumps(metrics)}
 Content Analysis: {json.dumps(content_analysis)}
-Provide:
-1. Specific improvements needed
-2. Rigor assessment considering technical and teaching abilities
-Format as JSON with keys: geographyFit, improvements (array), rigor"""
+
+Analyze the teaching style and provide:
+1. Geography fit assessment
+2. Specific improvements needed
+3. Profile matching for different learner types (choose ONLY ONE best match)
+4. Overall teaching rigor assessment
+
+Required JSON structure:
+{{
+    "geographyFit": "String describing geographical market fit",
+    "improvements": [
+        "Array of specific improvement recommendations"
+    ],
+    "rigor": "Assessment of teaching rigor",
+    "profileMatches": [
+        {{
+            "profile": "junior_technical",
+            "match": false,
+            "reason": "Detailed explanation why this profile is not the best match"
+        }},
+        {{
+            "profile": "senior_non_technical",
+            "match": false,
+            "reason": "Detailed explanation why this profile is not the best match"
+        }},
+        {{
+            "profile": "junior_expert",
+            "match": false,
+            "reason": "Detailed explanation why this profile is not the best match"
+        }},
+        {{
+            "profile": "senior_expert",
+            "match": false,
+            "reason": "Detailed explanation why this profile is not the best match"
+        }}
+    ]
+}}
+
+IMPORTANT: Set match=true for ONLY ONE profile that best matches the teaching style. 
+All other profiles should have match=false with explanations of why they're not the best fit.
+
+Profile Definitions:
+- junior_technical: Low Programming Ex + Low Work Ex
+- senior_non_technical: Low Programming Ex + High Work Ex
+- junior_expert: High Programming Ex + Low Work Ex
+- senior_expert: High Programming Ex + High Work Ex
+
+Evaluation Criteria for Best Match:
+1. Teaching Pace:
+   - junior_technical/senior_non_technical: Needs slower, detailed explanations
+   - junior_expert/senior_expert: Can handle faster, more concise delivery
+
+2. Technical Depth:
+   - junior_technical: Basic concepts with lots of examples
+   - senior_non_technical: Business context with technical foundations
+   - junior_expert: Advanced concepts with implementation details
+   - senior_expert: Complex systems and architectural considerations
+
+3. Business Context:
+   - junior_technical/junior_expert: Less emphasis needed
+   - senior_non_technical/senior_expert: Strong business context required
+
+4. Code Explanation:
+   - junior_technical: Step-by-step, basic syntax
+   - senior_non_technical: High-level overview with business impact
+   - junior_expert: Implementation details and best practices
+   - senior_expert: Architecture patterns and system design
+
+Consider:
+- Teaching pace and complexity level
+- Balance of technical vs business context
+- Depth of code explanations
+- Use of examples and analogies
+- Engagement style"""
 
 class MentorEvaluator:
     """Main class for video evaluation"""
@@ -475,25 +657,35 @@ class MentorEvaluator:
         """Lazy loading of whisper model with proper cache directory handling"""
         if self._whisper_model is None:
             try:
-                # First try to load from cache
+                logger.info("Attempting to initialize Whisper model...")
+                # First try to initialize model with downloading allowed
                 self._whisper_model = WhisperModel(
-                    "small",
+                    "medium",
                     device="cpu",
                     compute_type="int8",
                     download_root=self.model_cache_dir,
-                    local_files_only=True
+                    local_files_only=False  # Allow downloading if needed
                 )
+                logger.info("Whisper model initialized successfully")
             except Exception as e:
-                logger.info(f"Could not load model from cache, downloading: {e}")
-                # If loading from cache fails, download the model
-                self._whisper_model = WhisperModel(
-                    "small",
-                    device="cpu",
-                    compute_type="int8",
-                    download_root=self.model_cache_dir,
-                    local_files_only=False
-                )
-                logger.info("Model downloaded successfully")
+                logger.error(f"Error initializing Whisper model: {e}")
+                # If first attempt fails, try with local files
+                try:
+                    logger.info("Attempting to load model from local cache...")
+                    self._whisper_model = WhisperModel(
+                        "medium",
+                        device="cpu",
+                        compute_type="int8",
+                        download_root=self.model_cache_dir,
+                        local_files_only=True
+                    )
+                    logger.info("Model loaded from cache successfully")
+                except Exception as cache_error:
+                    logger.error(f"Error loading from cache: {cache_error}")
+                    raise RuntimeError(
+                        "Failed to initialize Whisper model. Please ensure you have "
+                        "internet connectivity for the first run to download the model."
+                    ) from cache_error
         return self._whisper_model
 
     @property
@@ -695,58 +887,54 @@ class MentorEvaluator:
             words = len(transcript.split())
             duration_minutes = audio_features.get('duration', 0) / 60
             
-            # Calculate words per minute with minimum threshold
+            # Calculate words per minute with updated range (130-160 WPM is ideal for teaching)
             words_per_minute = max(words / duration_minutes if duration_minutes > 0 else 0, 1)
             
-            # Improved filler word detection
+            # Improved filler word detection (2-3 per minute is acceptable)
             filler_words = re.findall(r'\b(um|uh|like|you\s+know|basically|actually|literally)\b', 
                                     transcript.lower())
             fillers_count = len(filler_words)
-            
-            # Calculate fillers per minute with minimum threshold
             fillers_per_minute = max(fillers_count / duration_minutes if duration_minutes > 0 else 0, 0.1)
             
-            # Improved error detection
+            # Improved error detection (1-2 per minute is acceptable)
             repeated_words = len(re.findall(r'\b(\w+)\s+\1\b', transcript.lower()))
             incomplete_sentences = len(re.findall(r'[a-zA-Z]+\s*\.\.\.|\b[a-zA-Z]+\s*-\s+', transcript))
             errors_count = repeated_words + incomplete_sentences
-            
-            # Calculate errors per minute with minimum threshold
             errors_per_minute = max(errors_count / duration_minutes if duration_minutes > 0 else 0, 0.1)
             
-            # Ensure mean amplitude is properly scaled and evaluated
+            # Ensure mean amplitude is properly scaled (60-75 dB is ideal for teaching)
             mean_amplitude = float(audio_features.get("mean_amplitude", 0))
             
-            # Updated acceptable ranges based on research and best practices
             return {
                 "speed": {
-                    "score": 1 if 130 <= words_per_minute <= 150 else 0,  # Narrowed optimal teaching range
+                    "score": 1 if 120 <= words_per_minute <= 180 else 0,  # Updated WPM range for teaching
                     "wpm": float(words_per_minute),
                     "total_words": int(words),
                     "duration_minutes": float(duration_minutes)
                 },
                 "fluency": {
-                    "score": 1 if fillers_per_minute <= 3 and errors_per_minute <= 2 else 0,  # Stricter fluency standards
+                    "score": 1 if errors_per_minute <= 2 and fillers_per_minute <= 3 else 0,  # Updated thresholds
                     "fillersPerMin": float(fillers_per_minute),
                     "errorsPerMin": float(errors_per_minute)
                 },
                 "flow": {
-                    "score": 1 if 8 <= float(audio_features.get("pauses_per_minute", 0)) <= 12 else 0,  # Adjusted for teaching pace
+                    "score": 1 if float(audio_features.get("pauses_per_minute", 0)) <= 12 else 0,  # Updated pause threshold
                     "pausesPerMin": float(audio_features.get("pauses_per_minute", 0))
                 },
                 "intonation": {
                     "pitch": float(audio_features.get("pitch_mean", 0)),
-                    "pitchScore": 1 if 80 <= float(audio_features.get("pitch_std", 0)) <= 90 else 0,  # Refined pitch variation range
+                    "pitchScore": 1 if 20 <= float(audio_features.get("pitch_std", 0)) / float(audio_features.get("pitch_mean", 1)) * 100 <= 40 else 0,  # Updated pitch variation range
                     "pitchVariation": float(audio_features.get("pitch_std", 0)),
-                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 8 else 0,  # Increased minimum variations
+                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 8 else 0,  # Updated minimum variations
                     "risingPatterns": int(audio_features.get("rising_patterns", 0)),
                     "fallingPatterns": int(audio_features.get("falling_patterns", 0)),
                     "variationsPerMin": float(audio_features.get("variations_per_minute", 0))
                 },
                 "energy": {
-                    "score": 1 if 20 <= mean_amplitude <= 40 else 0,  # Adjusted amplitude range for clearer speech
+                    "score": 1 if 60 <= mean_amplitude <= 75 else 0,  # Updated amplitude range for teaching
                     "meanAmplitude": mean_amplitude,
-                    "amplitudeDeviation": float(audio_features.get("amplitude_deviation", 0))
+                    "amplitudeDeviation": float(audio_features.get("amplitude_deviation", 0)),
+                    "variationScore": 1 if 0.05 <= float(audio_features.get("amplitude_deviation", 0)) <= 0.15 else 0  # Updated amplitude variation range
                 }
             }
 
@@ -784,318 +972,397 @@ def display_evaluation(evaluation: Dict[str, Any]):
         tabs = st.tabs(["Communication", "Teaching", "Recommendations", "Transcript"])
 
         with tabs[0]:
-            with st.status("Loading communication metrics...") as status:
-                progress_bar = st.progress(0)
-                progress_bar.progress(0.2)
-                st.header("Communication")
-
-                # Speed metrics
-                st.subheader("Speed")
+            st.header("Communication Metrics")
+            
+            metrics = evaluation.get("communication", {})
+            
+            # Speed Metrics
+            with st.expander("🏃 Speed", expanded=True):
+                speed = metrics.get("speed", {})
+                score = speed.get("score", 0)
+                wpm = speed.get("wpm", 0)
+                
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.metric("Score", "Pass" if evaluation["communication"]["speed"]["score"] == 1 
-                             else "Need Improvement")
+                    st.metric("Score", "✅ Pass" if score == 1 else "❌ Needs Improvement")
+                    st.metric("Words per Minute", f"{wpm:.1f}")
                 with col2:
-                    st.metric("Words per Minute", 
-                             f"{evaluation['communication']['speed']['wpm']:.1f}")
-                st.caption("Acceptable Range: 130-150 WPM")
-                progress_bar.progress(0.4)
-
-                # Fluency metrics
-                st.subheader("Fluency")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Score", "Pass" if evaluation["communication"]["fluency"]["score"] == 1 
-                             else "Need Improvement")
-                with col2:
-                    st.metric("Fillers/Min", 
-                             f"{evaluation['communication']['fluency']['fillersPerMin']:.1f}")
-                with col3:
-                    st.metric("Errors/Min", 
-                             f"{evaluation['communication']['fluency']['errorsPerMin']:.1f}")
-                progress_bar.progress(0.6)
-
-                # Flow metrics
-                st.subheader("Flow")
+                    st.info("**Acceptable Range:** 120-180 WPM")
+            
+            # Fluency Metrics
+            with st.expander("🗣️ Fluency", expanded=True):
+                fluency = metrics.get("fluency", {})
+                score = fluency.get("score", 0)
+                fpm = fluency.get("fillersPerMin", 0)
+                epm = fluency.get("errorsPerMin", 0)
+                
                 col1, col2 = st.columns(2)
                 with col1:
-                    st.metric("Score", "Pass" if evaluation["communication"]["flow"]["score"] == 1 
-                             else "Need Improvement")
+                    st.metric("Score", "✅ Pass" if score == 1 else "❌ Needs Improvement")
+                    st.metric("Fillers per Minute", f"{fpm:.1f}")
+                    st.metric("Errors per Minute", f"{epm:.1f}")
                 with col2:
-                    st.metric("Pauses/Min", 
-                             f"{evaluation['communication']['flow']['pausesPerMin']:.1f}")
-                st.caption("Acceptable Range: 8-12 pauses/min")
-
-                # Intonation metrics
-                st.subheader("Intonation")
+                    st.info("""
+                    **Acceptable Ranges:**
+                    - Fillers: <=3 FPM
+                    - Errors: <=2 EPM
+                    """)
+            
+            # Flow Metrics
+            with st.expander("🌊 Flow", expanded=True):
+                flow = metrics.get("flow", {})
+                score = flow.get("score", 0)
+                ppm = flow.get("pausesPerMin", 0)
                 
-                # Frequency/Pitch section
-                st.write("**Frequency/Pitch Metrics:**")
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns(2)
                 with col1:
-                    st.metric("Base Frequency", 
-                             f"{evaluation['communication']['intonation']['pitch']:.1f} Hz")
+                    st.metric("Score", "✅ Pass" if score == 1 else "❌ Needs Improvement")
+                    st.metric("Pauses per Minute", f"{ppm:.1f}")
                 with col2:
-                    st.metric("Pitch Score", 
-                             "Pass" if evaluation["communication"]["intonation"]["pitchScore"] == 1 
-                             else "Need Improvement")
-                with col3:
-                    st.metric("Pitch Variation (σ)", 
-                             f"{evaluation['communication']['intonation']['pitchVariation']:.1f} Hz")
-                st.caption("Acceptable Pitch Variation Range: 80-90 Hz")
+                    st.info("**Acceptable Range:** < 12 PPM")
+            
+            # Intonation Metrics
+            with st.expander("🎵 Intonation", expanded=True):
+                intonation = metrics.get("intonation", {})
+                pitch_score = intonation.get("pitchScore", 0)
+                pattern_score = intonation.get("patternScore", 0)
+                pitch = intonation.get("pitch", 0)
+                pitch_variation = intonation.get("pitchVariation", 0)
+                rising = intonation.get("risingPatterns", 0)
+                falling = intonation.get("fallingPatterns", 0)
+                variations = intonation.get("variationsPerMin", 0)
                 
-                # Patterns section
-                st.write("**Pattern Analysis:**")
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2 = st.columns(2)
                 with col1:
-                    st.metric("Pattern Score",
-                             "Pass" if evaluation["communication"]["intonation"]["patternScore"] == 1 
-                             else "Need Improvement")
+                    st.metric("Pitch Score", "✅ Pass" if pitch_score == 1 else "❌ Needs Improvement")
+                    st.metric("Pattern Score", "✅ Pass" if pattern_score == 1 else "❌ Needs Improvement")
+                    st.metric("Frequency / Pitch", f"{pitch:.1f} Hz")
+                    st.metric("Pitch Variation (σ)", f"{pitch_variation:.1f} Hz")
+                    st.metric("Rising Patterns", rising)
+                    st.metric("Falling Patterns", falling)
+                    st.metric("Variations per Minute", f"{variations:.1f}")
                 with col2:
-                    st.metric("Rising Patterns",
-                             evaluation["communication"]["intonation"]["risingPatterns"])
-                with col3:
-                    st.metric("Falling Patterns",
-                             evaluation["communication"]["intonation"]["fallingPatterns"])
-                with col4:
-                    st.metric("Variations/Min",
-                             f"{evaluation['communication']['intonation']['variationsPerMin']:.1f}")
-                st.caption("Acceptable Variations per Minute: >=8")
-                progress_bar.progress(0.8)
-
-                # Energy metrics
-                st.subheader("Energy")
-                col1, col2, col3 = st.columns(3)
+                    st.info("""
+                    **Acceptable Ranges:**
+                    - Pitch Variation: 20-40% from baseline
+                    - Variations per Minute: >8
+                    """)
+            
+            # Energy Metrics
+            with st.expander("⚡ Energy", expanded=True):
+                energy = metrics.get("energy", {})
+                score = energy.get("score", 0)
+                amplitude = energy.get("meanAmplitude", 0)
+                deviation = energy.get("amplitudeDeviation", 0)
+                
+                col1, col2 = st.columns(2)
                 with col1:
-                    st.metric("Score", 
-                             "Pass" if evaluation["communication"]["energy"]["score"] == 1 
-                             else "Need Improvement")
+                    st.metric("Score", "✅ Pass" if score == 1 else "❌ Needs Improvement")
+                    st.metric("Mean Amplitude", f"{amplitude:.1f}")
+                    st.metric("Amplitude Deviation (σ/μ)", f"{deviation:.2f}")
                 with col2:
-                    st.metric("Mean Amplitude",
-                             f"{evaluation['communication']['energy']['meanAmplitude']:.1f}")
-                with col3:
-                    st.metric("Amplitude Deviation (σ/μ)",
-                             f"{evaluation['communication']['energy']['amplitudeDeviation']:.2f}")
-                
-                st.caption("""
-                Acceptable Ranges:
-                - Mean Amplitude: 20 - 40 (normalized RMS value)
-                - Amplitude Deviation (σ/μ): >0.2
-                """)
-                
-                progress_bar.progress(1.0)
-                status.update(label="Communication metrics loaded!", state="complete")
+                    st.info("""
+                    **Acceptable Ranges:**
+                    - Mean Amplitude: 60-75 dB
+                    - Amplitude Deviation: 0.05-0.15
+                    """)
 
-        # Teaching tab with improved error handling
         with tabs[1]:
             st.header("Teaching Analysis")
             
-            # Access the teaching data directly from the evaluation
+            # Get teaching data
             teaching_data = evaluation.get("teaching", {})
             
-            # Debug prints
-            print("\nDEBUG INFO:")
-            print("Full teaching_data:", json.dumps(teaching_data, indent=2))
-            
-            # Get the concept assessment data
-            concept_data = teaching_data.get("ConceptAssessment", {})
-            code_data = teaching_data.get("CodeAssessment", {})
-            
-            print("Concept Data:", json.dumps(concept_data, indent=2))
-            print("Code Data:", json.dumps(code_data, indent=2))
-            
-            # Define categories to display
-            concept_categories = {
-                "Subject Matter Accuracy": "SubjectMatterAccuracy",
-                "First Principles Approach": "FirstPrinciplesApproach",
-                "Examples and Context": "ExamplesAndBusinessContext",
-                "Cohesive Storytelling": "CohesiveStorytelling",
-                "Engagement": "EngagementAndInteraction",
-                "Professional Tone": "ProfessionalTone"
-            }
-            
-            code_categories = {
-                "Depth of Explanation": "DepthOfExplanation",
-                "Output Interpretation": "OutputInterpretation",
-                "Breaking Down Complexity": "BreakingDownComplexity"
-            }
-            
-            # Display Concept Assessment
+            # Concept Assessment Section
             st.subheader("Concept Assessment")
             
-            # Debug print for first category
-            first_category = list(concept_categories.values())[0]
-            print(f"First category data:", json.dumps(concept_data.get(first_category, {}), indent=2))
+            concept_assessment = teaching_data.get("Concept Assessment", {})
             
-            col1, col2 = st.columns(2)
+            # Define concept categories with descriptions
+            concept_categories = [
+                ("Subject Matter Accuracy", "Is the mentor making any factual errors when teaching / making any wrong assumptions or wrong conclusions / correlations - is he talking in the air"),
+                ("First Principles Approach", "You talk about the WHY first and build an understanding / intuition of the topic before you introduce technical jargons / terminologies"),
+                ("Examples and Business Context", "In relevant areas, you support your teaching with business examples and context"),
+                ("Cohesive Storytelling", "Is the mentor linking between topics or jumping around"),
+                ("Engagement and Interaction", "Is the mentor speaking to himself or is he asking learners thought provoking questions to inspire understanding"),
+                ("Professional Tone", "Is the mentor speaking in a casual or professional tone / is he using words that are unprofessional")
+            ]
             
             # Display each concept category
-            for i, (display_name, key) in enumerate(concept_categories.items()):
-                with col1 if i % 2 == 0 else col2:
-                    st.write(f"### {display_name}")
-                    category_data = concept_data.get(key, {"score": 0, "citations": []})
+            for category, description in concept_categories:
+                with st.expander(f"{category} - Score: {'Pass' if concept_assessment.get(category, {}).get('Score', 0) == 1 else 'Needs Improvement'}", expanded=True):
+                    st.caption(description)
                     
-                    # Debug print for category data
-                    print(f"Category {key} data:", json.dumps(category_data, indent=2))
+                    assessment = concept_assessment.get(category, {"Score": 0, "Citations": []})
+                    score = assessment.get("Score", 0)
+                    citations = assessment.get("Citations", [])
                     
-                    # Display score with color-coded metric
-                    score = category_data.get("score", 0)
-                    st.metric(
-                        "Score", 
-                        "Pass" if score == 1 else "Needs Improvement",
-                        delta="✓" if score == 1 else "✗",
-                        delta_color="normal" if score == 1 else "inverse"
-                    )
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        # Display score with color and icon
+                        score_color = "green" if score == 1 else "red"
+                        score_icon = "✅" if score == 1 else "❌"
+                        st.markdown(f"**Score:** :{score_color}[{score_icon} {'Pass' if score == 1 else 'Needs Improvement'}]")
                     
-                    # Display citations in an expandable section
-                    citations = category_data.get("citations", [])
-                    with st.expander("View Evidence"):
-                        if citations:  # Only create expander if there are citations
-                            if isinstance(citations, list):
-                                for citation in citations:
-                                    if isinstance(citation, dict):
-                                        st.write(f"• [{citation.get('timestamp')}] {citation.get('description')}")
-                                    else:
-                                        st.write(f"• {citation}")
-                            else:
-                                st.write(f"• {citations}")
+                    with col2:
+                        # Display citations in a formatted box
+                        if citations:
+                            st.markdown("**Key Observations:**")
+                            for citation in citations:
+                                st.markdown(f"""
+                                <div class="citation-box">
+                                    🔍 {citation}
+                                </div>
+                                """, unsafe_allow_html=True)
                         else:
-                            st.write("No evidence available")
-                    
-                    st.markdown("---")
+                            st.info("No observations available")
             
-            # Display Code Assessment
+            # Code Assessment Section
             st.subheader("Code Assessment")
-            col1, col2 = st.columns(2)
+            
+            code_assessment = teaching_data.get("Code Assessment", {})
+            
+            # Define code categories with descriptions
+            code_categories = [
+                ("Depth of Explanation", "Is code just being read out or is the mentor talking about syntaxes, usage of libraries and why, functions, parameters and method (and what they do)"),
+                ("Output Interpretation", "Are the outputs of the code being interpreted in the light of a business context and outcome"),
+                ("Breaking down Complexity", "Is the mentor able to break down a code into simpler sections of code blocks / modules and explain their purpose and logical flow")
+            ]
             
             # Display each code category
-            for i, (display_name, key) in enumerate(code_categories.items()):
-                with col1 if i % 2 == 0 else col2:
-                    st.write(f"### {display_name}")
-                    category_data = code_data.get(key, {"score": 0, "citations": []})
+            for category, description in code_categories:
+                with st.expander(f"{category} - Score: {'Pass' if code_assessment.get(category, {}).get('Score', 0) == 1 else 'Needs Improvement'}", expanded=True):
+                    st.caption(description)
                     
-                    # Debug print for code category data
-                    print(f"Code category {key} data:", json.dumps(category_data, indent=2))
+                    assessment = code_assessment.get(category, {"Score": 0, "Citations": []})
+                    score = assessment.get("Score", 0)
+                    citations = assessment.get("Citations", [])
                     
-                    # Display score with color-coded metric
-                    score = category_data.get("score", 0)
-                    st.metric(
-                        "Score", 
-                        "Pass" if score == 1 else "Needs Improvement",
-                        delta="✓" if score == 1 else "✗",
-                        delta_color="normal" if score == 1 else "inverse"
-                    )
+                    col1, col2 = st.columns([1, 2])
+                    with col1:
+                        score_color = "green" if score == 1 else "red"
+                        score_icon = "✅" if score == 1 else "❌"
+                        st.markdown(f"**Score:** :{score_color}[{score_icon} {'Pass' if score == 1 else 'Needs Improvement'}]")
                     
-                    # Display citations in an expandable section
-                    citations = category_data.get("citations", [])
-                    with st.expander("View Evidence"):
-                        if citations:  # Only create expander if there are citations
-                            if isinstance(citations, list):
-                                for citation in citations:
-                                    if isinstance(citation, dict):
-                                        st.write(f"• [{citation.get('timestamp')}] {citation.get('description')}")
-                                    else:
-                                        st.write(f"• {citation}")
-                            else:
-                                st.write(f"• {citations}")
+                    with col2:
+                        if citations:
+                            st.markdown("**Key Observations:**")
+                            for citation in citations:
+                                st.markdown(f"""
+                                <div class="citation-box">
+                                    💻 {citation}
+                                </div>
+                                """, unsafe_allow_html=True)
                         else:
-                            st.write("No evidence available")
-                    
-                    st.markdown("---")
+                            st.info("No observations available")
+            
+            # Teaching Summary Section with metrics
+            st.subheader("Teaching Summary")
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                concept_scores = [assessment.get("Score", 0) for category in concept_assessment.values() for assessment in [category]]
+                concept_score = (sum(concept_scores) / len(concept_scores) * 100) if concept_scores else 0
+                st.metric("Concept Score", f"{concept_score:.1f}%", 
+                         delta="Pass" if concept_score >= 70 else "Needs Improvement",
+                         delta_color="normal" if concept_score >= 70 else "inverse")
+            
+            with col2:
+                code_scores = [assessment.get("Score", 0) for category in code_assessment.values() for assessment in [category]]
+                code_score = (sum(code_scores) / len(code_scores) * 100) if code_scores else 0
+                st.metric("Code Score", f"{code_score:.1f}%",
+                         delta="Pass" if code_score >= 70 else "Needs Improvement",
+                         delta_color="normal" if code_score >= 70 else "inverse")
+            
+            with col3:
+                total_scores = concept_scores + code_scores
+                overall_score = (sum(total_scores) / len(total_scores) * 100) if total_scores else 0
+                st.metric("Overall Teaching Score", f"{overall_score:.1f}%",
+                         delta="Pass" if overall_score >= 70 else "Needs Improvement",
+                         delta_color="normal" if overall_score >= 70 else "inverse")
 
-            # Add a debug section to display raw data
-            with st.expander("Debug Raw Data"):
-                st.json(teaching_data)
-
-        # Recommendations tab with improved formatting
         with tabs[2]:
             st.header("Recommendations")
             
             recommendations = evaluation.get("recommendations", {})
             
-            # Geography Fit with improved formatting
-            st.subheader("🌍 Geography Fit")
-            geography_fit = recommendations.get("geographyFit", "Not specified")
-            st.write(geography_fit)
+            # Calculate Overall Score
+            communication_metrics = evaluation.get("communication", {})
+            teaching_data = evaluation.get("teaching", {})
             
-            # Improvements Needed with better formatting
-            st.subheader("💡 Suggested Improvements")
-            improvements = recommendations.get("improvements", [])
-            if isinstance(improvements, list):
-                for improvement in improvements:
-                    if isinstance(improvement, dict):
-                        st.markdown(f"""
-                        **{improvement.get('aspect', 'General')}**  
-                        {improvement.get('recommendation', '')}
-                        """)
-                    else:
-                        st.write(f"• {improvement}")
+            # Calculate Communication Score
+            comm_scores = []
+            for category in ["speed", "fluency", "flow", "intonation", "energy"]:
+                if category in communication_metrics:
+                    if "score" in communication_metrics[category]:
+                        comm_scores.append(communication_metrics[category]["score"])
             
-            # Rigor Assessment with enhanced display
-            st.subheader("📊 Rigor Assessment")
-            rigor = recommendations.get("rigor", {})
-            for category, assessment in rigor.items():
-                if isinstance(assessment, dict):
-                    st.markdown(f"""
-                    **{category.title()}**  
-                    Score: {'Pass' if assessment.get('score') == 1 else 'Needs Improvement'}  
-                    {assessment.get('justification', '')}
-                    """)
-                else:
-                    st.write(f"**{category.title()}:** {assessment}")
+            communication_score = (sum(comm_scores) / len(comm_scores) * 100) if comm_scores else 0
             
-            # Add visual separator
-            st.markdown("---")
+            # Calculate Teaching Score (combining concept and code assessment)
+            concept_assessment = teaching_data.get("Concept Assessment", {})
+            code_assessment = teaching_data.get("Code Assessment", {})
             
-            # Summary metrics with error handling
-            st.subheader("📈 Overall Scores")
+            teaching_scores = []
+            # Add concept scores
+            for category in concept_assessment.values():
+                if isinstance(category, dict) and "Score" in category:
+                    teaching_scores.append(category["Score"])
+            
+            # Add code scores
+            for category in code_assessment.values():
+                if isinstance(category, dict) and "Score" in category:
+                    teaching_scores.append(category["Score"])
+            
+            teaching_score = (sum(teaching_scores) / len(teaching_scores) * 100) if teaching_scores else 0
+            
+            # Calculate Overall Score (50-50 weight between communication and teaching)
+            overall_score = (communication_score + teaching_score) / 2
+            
+            # Display Overall Scores at the top of recommendations
+            st.markdown("### 📊 Overall Performance")
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                # Calculate teaching score
-                teaching_data = evaluation.get("teaching", {})
-                concept_scores = [
-                    concept_data.get(cat, {}).get("score", 0)
-                    for cat in ["SubjectMatterAccuracy", "FirstPrinciplesApproach", 
-                               "ExamplesAndBusinessContext", "CohesiveStorytelling",
-                               "EngagementAndInteraction", "ProfessionalTone"]
-                ]
-                code_scores = [
-                    code_data.get(cat, {}).get("score", 0)
-                    for cat in ["DepthOfExplanation", "OutputInterpretation", "BreakingDownComplexity"]
-                ]
-                
-                all_scores = concept_scores + code_scores
-                teaching_score = (sum(all_scores) / len(all_scores)) * 100 if all_scores else 0
-                st.metric("Teaching Score", f"{teaching_score:.1f}%")
+                st.metric(
+                    "Communication Score",
+                    f"{communication_score:.1f}%",
+                    delta="Pass" if communication_score >= 70 else "Needs Improvement",
+                    delta_color="normal" if communication_score >= 70 else "inverse"
+                )
             
             with col2:
-                # Calculate communication score
-                communication = evaluation.get("communication", {})
-                comm_categories = ["speed", "fluency", "flow", "intonation", "energy"]
-                comm_scores = [
-                    communication.get(cat, {}).get("score", 0)
-                    for cat in comm_categories
-                ]
-                comm_score = (sum(comm_scores) / len(comm_scores)) * 100 if comm_scores else 0
-                st.metric("Communication Score", f"{comm_score:.1f}%")
+                st.metric(
+                    "Teaching Score",
+                    f"{teaching_score:.1f}%",
+                    delta="Pass" if teaching_score >= 70 else "Needs Improvement",
+                    delta_color="normal" if teaching_score >= 70 else "inverse"
+                )
             
             with col3:
-                # Calculate overall score (average of teaching and communication)
-                overall_score = (teaching_score + comm_score) / 2
-                st.metric("Overall Score", f"{overall_score:.1f}%")
+                st.metric(
+                    "Overall Score",
+                    f"{overall_score:.1f}%",
+                    delta="Pass" if overall_score >= 70 else "Needs Improvement",
+                    delta_color="normal" if overall_score >= 70 else "inverse"
+                )
             
-            # Additional metrics row
-            col1, col2 = st.columns(2)
-            with col1:
-                # Count total improvement points
-                improvement_count = len(improvements) if isinstance(improvements, list) else 1
-                st.metric("Improvement Points", improvement_count)
+            # Continue with existing recommendations display
+            with st.expander("💡 Areas for Improvement", expanded=True):
+                improvements = recommendations.get("improvements", [])
+                if isinstance(improvements, list):
+                    for i, improvement in enumerate(improvements, 1):
+                        if isinstance(improvement, str):
+                            category = "General"
+                            icon = "🎯"
+                            if any(keyword in improvement.lower() for keyword in ["voice", "volume", "pitch", "pace"]):
+                                category = "Voice and Delivery"
+                                icon = "🗣️"
+                            elif any(keyword in improvement.lower() for keyword in ["explain", "concept", "understanding"]):
+                                category = "Teaching Approach"
+                                icon = "📚"
+                            elif any(keyword in improvement.lower() for keyword in ["engage", "interact", "question"]):
+                                category = "Engagement"
+                                icon = "🤝"
+                            elif any(keyword in improvement.lower() for keyword in ["code", "technical", "implementation"]):
+                                category = "Technical Content"
+                                icon = "💻"
+                            
+                            st.markdown(f"""
+                            <div class="recommendation-card">
+                                <h4>{icon} {i}. {category}</h4>
+                                <p>{improvement}</p>
+                            </div>
+                            """, unsafe_allow_html=True)
             
-            with col2:
-                # Display words per minute if available
-                wpm = communication.get("speed", {}).get("wpm", 0)
-                st.metric("Speaking Speed", f"{wpm:.1f} WPM")
+            # Profile Matching with enhanced formatting
+            with st.expander("👥 Profile Matching", expanded=True):
+                st.markdown("""
+                    <div class="profile-guide">
+                        <h4>🎯 Profile Matching Guide</h4>
+                        <p>Analyzing mentor's teaching style compatibility with different learner profiles</p>
+                    </div>
+                """, unsafe_allow_html=True)
+                
+                profiles = {
+                    "junior_technical": {
+                        "title": "Junior Technical",
+                        "description": "Low Programming Ex + Low Work Ex",
+                        "icon": "👨‍💻",
+                        "characteristics": [
+                            "Young professionals starting their technical career",
+                            "Need engaging, fast-paced content",
+                            "Prefer hands-on examples"
+                        ]
+                    },
+                    "senior_non_technical": {
+                        "title": "Senior Non-Technical",
+                        "description": "Low Programming Ex + High Work Ex",
+                        "icon": "👨‍💼",
+                        "characteristics": [
+                            "Experienced professionals transitioning to technical roles",
+                            "Need slower pace with detailed explanations",
+                            "Appreciate business context"
+                        ]
+                    },
+                    "junior_expert": {
+                        "title": "Junior Expert",
+                        "description": "High Programming Ex + Low Work Ex",
+                        "icon": "🚀",
+                        "characteristics": [
+                            "Technical experts early in their career",
+                            "Prefer fast-paced, advanced content",
+                            "Focus on technical depth"
+                        ]
+                    },
+                    "senior_expert": {
+                        "title": "Senior Expert",
+                        "description": "High Programming Ex + High Work Ex",
+                        "icon": "🎯",
+                        "characteristics": [
+                            "Seasoned technical professionals",
+                            "Expect advanced concepts with business context",
+                            "Value efficient, precise delivery"
+                        ]
+                    }
+                }
+                
+                profile_matches = recommendations.get("profileMatches", [])
+                
+                # Find the recommended profile
+                recommended_profile = next(
+                    (match["profile"] for match in profile_matches if match.get("match", False)),
+                    None
+                )
+                
+                for profile_key, profile_data in profiles.items():
+                    match_info = next(
+                        (match for match in profile_matches if match["profile"] == profile_key),
+                        None
+                    )
+                    # Only mark as recommended if it matches the single recommended profile
+                    is_recommended = profile_key == recommended_profile
+                    
+                    st.markdown(f"""
+                    <div class="profile-card {'recommended' if is_recommended else ''}">
+                        <div class="profile-header">
+                            <h5>{profile_data['icon']} {profile_data['title']}</h5>
+                            <span class="profile-badge {profile_key}">
+                                {profile_data['description']}
+                            </span>
+                        </div>
+                        <div class="profile-content">
+                            <p><strong>Characteristics:</strong></p>
+                            <ul>
+                                {''.join(f'<li>{char}</li>' for char in profile_data['characteristics'])}
+                            </ul>
+                            <div class="recommendation-status {'recommended' if is_recommended else ''}">
+                                {('✅ Recommended' if is_recommended else '⚠️ Not Optimal')}<br>
+                                <small>{match_info['reason'] if match_info else 'Profile not matched based on teaching style'}</small>
+                            </div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
         # Transcript tab with error handling
         with tabs[3]:
@@ -1107,6 +1374,151 @@ def display_evaluation(evaluation: Dict[str, Any]):
         st.error(f"Error displaying results: {str(e)}")
         st.error("Please check the evaluation data structure and try again.")
 
+    # Add these styles to the existing CSS in the main function
+    st.markdown("""
+        <style>
+        /* ... existing styles ... */
+        
+        .citation-box {
+            background-color: #f8f9fa;
+            border-left: 3px solid #6c757d;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 0 4px 4px 0;
+        }
+        
+        .recommendation-card {
+            background-color: #ffffff;
+            border-left: 4px solid #1f77b4;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .recommendation-card h4 {
+            color: #1f77b4;
+            margin: 0 0 10px 0;
+        }
+        
+        .rigor-card {
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            padding: 20px;
+            margin: 10px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .score-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-weight: bold;
+            margin: 10px 0;
+        }
+        
+        .green-score {
+            background-color: #28a745;
+            color: white;
+        }
+        
+        .orange-score {
+            background-color: #fd7e14;
+            color: white;
+        }
+        
+        .metric-container {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 10px 0;
+        }
+        
+        .profile-guide {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #1f77b4;
+        }
+        
+        .profile-card {
+            background-color: #ffffff;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 10px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: all 0.3s ease;
+        }
+        
+        .profile-card.recommended {
+            border-left: 4px solid #28a745;
+        }
+        
+        .profile-header {
+            margin-bottom: 15px;
+        }
+        
+        .profile-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 15px;
+            font-size: 0.9em;
+            margin-top: 5px;
+            background-color: #f8f9fa;
+        }
+        
+        .profile-content ul {
+            margin: 10px 0;
+            padding-left: 20px;
+        }
+        
+        .recommendation-status {
+            margin-top: 15px;
+            padding: 10px;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+            font-weight: bold;
+        }
+        
+        .recommendation-status small {
+            display: block;
+            margin-top: 5px;
+            font-weight: normal;
+            color: #666;
+        }
+        
+        .recommendation-status.recommended {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+        
+        .recommendation-status:not(.recommended) {
+            background-color: #fff3cd;
+            border-color: #ffeeba;
+            color: #856404;
+        }
+        
+        .profile-card.recommended {
+            border-left: 4px solid #28a745;
+            box-shadow: 0 2px 8px rgba(40, 167, 69, 0.1);
+        }
+        
+        .profile-card:not(.recommended) {
+            border-left: 4px solid #ffc107;
+            opacity: 0.8;
+        }
+        
+        .profile-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
 def check_dependencies() -> List[str]:
     """Check if required dependencies are installed"""
     missing = []
@@ -1116,12 +1528,221 @@ def check_dependencies() -> List[str]:
     
     return missing
 
+def generate_pdf_report(evaluation_data: Dict[str, Any]) -> bytes:
+    """Generate a formatted PDF report from evaluation data"""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import letter
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from io import BytesIO
+        
+        # Create PDF buffer
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=letter)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        # Title
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=24,
+            spaceAfter=30
+        )
+        story.append(Paragraph("Mentor Demo Evaluation Report", title_style))
+        story.append(Spacer(1, 20))
+        
+        # Communication Metrics Section
+        story.append(Paragraph("Communication Metrics", styles['Heading2']))
+        comm_metrics = evaluation_data.get("communication", {})
+        
+        # Create tables for each metric category
+        for category in ["speed", "fluency", "flow", "intonation", "energy"]:
+            if category in comm_metrics:
+                metrics = comm_metrics[category]
+                story.append(Paragraph(category.title(), styles['Heading3']))
+                
+                data = [[k.replace('_', ' ').title(), str(v)] for k, v in metrics.items()]
+                t = Table(data, colWidths=[200, 200])
+                t.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 14),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('TEXTCOLOR', (0, 1), (-1, -1), colors.black),
+                    ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 1), (-1, -1), 12),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                story.append(t)
+                story.append(Spacer(1, 20))
+        
+        # Teaching Analysis Section
+        story.append(Paragraph("Teaching Analysis", styles['Heading2']))
+        teaching_data = evaluation_data.get("teaching", {})
+        
+        for assessment_type in ["Concept Assessment", "Code Assessment"]:
+            if assessment_type in teaching_data:
+                story.append(Paragraph(assessment_type, styles['Heading3']))
+                categories = teaching_data[assessment_type]
+                
+                for category, details in categories.items():
+                    score = details.get("Score", 0)
+                    citations = details.get("Citations", [])
+                    
+                    data = [
+                        [category, "Score: " + ("Pass" if score == 1 else "Needs Improvement")],
+                        ["Citations:", ""]
+                    ] + [["-", citation] for citation in citations]
+                    
+                    t = Table(data, colWidths=[200, 300])
+                    t.setStyle(TableStyle([
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                    ]))
+                    story.append(t)
+                    story.append(Spacer(1, 20))
+        
+        # Recommendations Section
+        story.append(Paragraph("Recommendations", styles['Heading2']))
+        recommendations = evaluation_data.get("recommendations", {})
+        
+        if "improvements" in recommendations:
+            story.append(Paragraph("Areas for Improvement:", styles['Heading3']))
+            for improvement in recommendations["improvements"]:
+                story.append(Paragraph("• " + improvement, styles['Normal']))
+        
+        # Build PDF
+        doc.build(story)
+        pdf_data = buffer.getvalue()
+        buffer.close()
+        
+        return pdf_data
+        
+    except Exception as e:
+        logger.error(f"Error generating PDF report: {e}")
+        raise RuntimeError(f"Failed to generate PDF report: {str(e)}")
+
 def main():
     try:
+        # Set page config must be the first Streamlit command
         st.set_page_config(page_title="🎓 Mentor Demo Review System", layout="wide")
         
-        st.title("🎓 Mentor Demo Review System")
-        
+        # Add custom CSS for animations and styling
+        st.markdown("""
+            <style>
+                @keyframes fadeIn {
+                    from { opacity: 0; }
+                    to { opacity: 1; }
+                }
+                
+                @keyframes slideIn {
+                    from { transform: translateX(-100%); }
+                    to { transform: translateX(0); }
+                }
+                
+                @keyframes pulse {
+                    0% { transform: scale(1); }
+                    50% { transform: scale(1.05); }
+                    100% { transform: scale(1); }
+                }
+                
+                .fade-in {
+                    animation: fadeIn 1s ease-in;
+                }
+                
+                .slide-in {
+                    animation: slideIn 0.5s ease-out;
+                }
+                
+                .pulse {
+                    animation: pulse 2s infinite;
+                }
+                
+                .metric-card {
+                    background-color: #f0f2f6;
+                    border-radius: 10px;
+                    padding: 20px;
+                    margin: 10px 0;
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+                    transition: transform 0.3s ease;
+                }
+                
+                .metric-card:hover {
+                    transform: translateY(-5px);
+                }
+                
+                .stButton>button {
+                    transition: all 0.3s ease;
+                }
+                
+                .stButton>button:hover {
+                    transform: scale(1.05);
+                }
+                
+                .category-header {
+                    background: linear-gradient(90deg, #1f77b4, #2c3e50);
+                    color: white;
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin: 10px 0;
+                }
+                
+                .score-badge {
+                    padding: 5px 10px;
+                    border-radius: 15px;
+                    font-weight: bold;
+                }
+                
+                .score-pass {
+                    background-color: #28a745;
+                    color: white;
+                }
+                
+                .score-fail {
+                    background-color: #dc3545;
+                    color: white;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+
+        # Sidebar with instructions (only once)
+        with st.sidebar:
+            st.markdown("""
+                <div class="slide-in">
+                    <h2>Instructions</h2>
+                    <ol>
+                        <li>Upload your teaching video</li>
+                        <li>Wait for the analysis</li>
+                        <li>Review the detailed feedback</li>
+                        <li>Download the report</li>
+                    </ol>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Add file format information separately
+            st.markdown("**Supported formats:** MP4, AVI, MOV")
+            st.markdown("**Maximum file size:** 500MB")
+            
+            st.header("Processing Status")
+            st.info("Upload a video to begin analysis")
+
+        # Main title (only once)
+        st.markdown("""
+            <div class="fade-in">
+                <h1 style='text-align: center; color: #1f77b4;'>
+                    🎓 Mentor Demo Review System
+                </h1>
+            </div>
+        """, unsafe_allow_html=True)
+
         # Check dependencies with progress
         with st.status("Checking system requirements...") as status:
             progress_bar = st.progress(0)
@@ -1145,29 +1766,37 @@ def main():
             
             progress_bar.progress(1.0)
             status.update(label="System requirements satisfied!", state="complete")
-        
-        with st.sidebar:
-            st.header("Instructions")
-            st.markdown("""
-            1. Upload your teaching video
-            2. Wait for the analysis 
-            3. Review the detailed feedback
-            4. Download the report
-            
-            **Supported formats:** MP4, AVI, MOV
-            **Maximum file size:** 500mb
-            """)
-            
-            st.header("Processing Status")
-            st.info("Upload a video to begin analysis")
-        
+
+        # Temporary: Add radio button for input type selection
+        input_type = st.radio(
+            "Select Input Type (Temporary Feature)",
+            ["Video Only", "Video + Transcript"],
+            help="Temporary feature: Choose to upload video only or video with transcript"
+        )
+
         uploaded_file = st.file_uploader(
             "Upload Teaching Video",
             type=['mp4', 'avi', 'mov'],
             help="Upload your teaching video in MP4, AVI, or MOV format"
         )
+
+        # Temporary: Add transcript uploader if Video + Transcript is selected
+        uploaded_transcript = None
+        if input_type == "Video + Transcript":
+            uploaded_transcript = st.file_uploader(
+                "Upload Transcript (Optional)",
+                type=['txt'],
+                help="Upload your transcript in TXT format"
+            )
         
         if uploaded_file:
+            # Add a pulsing animation while processing
+            st.markdown("""
+                <div class="pulse" style="text-align: center;">
+                    <h3>Processing your video...</h3>
+                </div>
+            """, unsafe_allow_html=True)
+            
             # Create temp directory for processing
             temp_dir = tempfile.mkdtemp()
             video_path = os.path.join(temp_dir, uploaded_file.name)
@@ -1204,21 +1833,65 @@ def main():
                     # Process video only if results aren't already in session state
                     with st.spinner("Processing video"):
                         evaluator = MentorEvaluator()
-                        st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
+                        
+                        # Temporary: Handle transcript if provided
+                        if uploaded_transcript:
+                            transcript_text = uploaded_transcript.getvalue().decode('utf-8')
+                            # Extract audio features but skip transcription
+                            audio_features = evaluator.feature_extractor.extract_features(video_path)
+                            
+                            # Evaluate speech metrics
+                            speech_metrics = evaluator._evaluate_speech_metrics(
+                                transcript_text,
+                                audio_features
+                            )
+                            
+                            # Analyze content
+                            content_analysis = evaluator.content_analyzer.analyze_content(transcript_text)
+                            
+                            # Generate recommendations
+                            recommendations = evaluator.recommendation_generator.generate_recommendations(
+                                speech_metrics,
+                                content_analysis
+                            )
+                            
+                            # Combine results
+                            st.session_state.evaluation_results = {
+                                "communication": speech_metrics,
+                                "teaching": content_analysis,
+                                "recommendations": recommendations,
+                                "transcript": transcript_text
+                            }
+                        else:
+                            # Original flow: full video evaluation
+                            st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
                 
                 # Display results using stored evaluation
                 st.success("Analysis complete!")
                 display_evaluation(st.session_state.evaluation_results)
                 
-                # Add download button using stored results
-                if st.download_button(
-                    "📥 Download Full Report",
-                    json.dumps(st.session_state.evaluation_results, indent=2),
-                    "evaluation_report.json",
-                    "application/json",
-                    help="Download the complete evaluation report in JSON format"
-                ):
-                    st.success("Report downloaded successfully!")
+                # Add download options
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    if st.download_button(
+                        "📥 Download JSON Report",
+                        json.dumps(st.session_state.evaluation_results, indent=2),
+                        "evaluation_report.json",
+                        "application/json",
+                        help="Download the raw evaluation data in JSON format"
+                    ):
+                        st.success("JSON report downloaded successfully!")
+                
+                with col2:
+                    if st.download_button(
+                        "📄 Download Full Report (PDF)",
+                        generate_pdf_report(st.session_state.evaluation_results),
+                        "evaluation_report.pdf",
+                        "application/pdf",
+                        help="Download a formatted PDF report with detailed analysis"
+                    ):
+                        st.success("PDF report downloaded successfully!")
                 
             except Exception as e:
                 st.error(f"Error during evaluation: {str(e)}")
