@@ -226,7 +226,7 @@ class ContentAnalyzer:
         self.retry_delay = 1
         
     def analyze_content(self, transcript: str, progress_callback=None) -> Dict[str, Any]:
-        """Analyze teaching content with more lenient validation and robust JSON handling"""
+        """Analyze teaching content with retry logic and robust JSON handling"""
         for attempt in range(self.retry_count):
             try:
                 if progress_callback:
@@ -241,38 +241,28 @@ class ContentAnalyzer:
                 
                 try:
                     response = self.client.chat.completions.create(
-                        model="gpt-4o-mini",  # Keeping original model
+                        model="gpt-4o-mini",
                         messages=[
-                            {"role": "system", "content": """You are a balanced teaching evaluator providing constructive analysis.
-                             Score of 1 should be given when MOST criteria below are met with reasonable evidence. 
-                             Only default to 0 if MULTIPLE major criteria are missing or severely lacking.
+                            {"role": "system", "content": """You are a teaching expert providing a structured analysis. 
+                             Analyze the teaching content and provide a detailed assessment in the following format:
                              
-                             Concept Assessment Scoring Criteria:
-                             - Subject Matter Accuracy (Score 1 requires: Generally accurate information, minor errors acceptable)
-                             - First Principles Approach (Score 1 requires: Some explanation of fundamentals)
-                             - Examples and Business Context (Score 1 requires: At least one relevant example)
-                             - Cohesive Storytelling (Score 1 requires: Generally logical flow, minor jumps acceptable)
-                             - Engagement and Interaction (Score 1 requires: Some attempt at learner engagement)
-                             - Professional Tone (Score 1 requires: Generally professional language, occasional casual expressions acceptable)
+                             Concept Assessment:
+                             - Subject Matter Accuracy (Score: 0/1, Citations with timestamps)
+                             - First Principles Approach (Score: 0/1, Citations with timestamps)
+                             - Examples and Business Context (Score: 0/1, Citations with timestamps)
+                             - Cohesive Storytelling (Score: 0/1, Citations with timestamps)
+                             - Engagement and Interaction (Score: 0/1, Citations with timestamps)
+                             - Professional Tone (Score: 0/1, Citations with timestamps)
                              
-                             Code Assessment Scoring Criteria:
-                             - Depth of Explanation (Score 1 requires: Basic explanation of implementation)
-                             - Output Interpretation (Score 1 requires: Some connection between code and business impact)
-                             - Breaking down Complexity (Score 1 requires: Attempt to break down concepts)
-                             
-                             Citations Requirements:
-                             - Include timestamps [MM:SS] where possible
-                             - Provide at least one example for each category
-                             - Focus on constructive feedback
-                             
-                             Remember that transcripts may contain errors, so focus on the overall teaching effectiveness 
-                             rather than minor mistakes or typos.
+                             Code Assessment:
+                             - Depth of Explanation (Score: 0/1, Citations with timestamps)
+                             - Output Interpretation (Score: 0/1, Citations with timestamps)
+                             - Breaking down Complexity (Score: 0/1, Citations with timestamps)
                              
                              Always respond with valid JSON containing these exact categories."""},
                             {"role": "user", "content": prompt}
                         ],
-                        response_format={"type": "json_object"},
-                        temperature=0.4  # Slightly higher temperature for more lenient evaluation
+                        response_format={"type": "json_object"}
                     )
                     logger.info("API call successful")
                 except Exception as api_error:
@@ -835,88 +825,46 @@ class MentorEvaluator:
             raise AudioProcessingError(f"Audio extraction failed: {str(e)}")
 
     def _transcribe_audio(self, audio_path: str, progress_callback=None) -> str:
-        """Transcribe audio with optimized performance using batching and parallel processing"""
+        """Transcribe audio with improved memory management"""
         try:
             if progress_callback:
                 progress_callback(0.1, "Loading transcription model...")
-
-            # Check if GPU is available and set device accordingly
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
-            
-            # Generate cache key based on file content
-            cache_key = f"transcript_{hash(open(audio_path, 'rb').read())}"
-            
-            # Check cache first
-            if cache_key in st.session_state:
-                logger.info("Using cached transcription")
-                return st.session_state[cache_key]
-
-            # Initialize model with optimized settings
-            model = WhisperModel(
-                "small",
-                device=device,
-                compute_type=compute_type,
-                download_root=self.model_cache_dir,
-                local_files_only=False,
-                cpu_threads=4,  # Adjust based on system capabilities
-                num_workers=2   # Adjust based on system capabilities
-            )
-
-            # Transcribe with correct parameters for faster-whisper
-            segments, _ = model.transcribe(
-                audio_path,
-                beam_size=5,
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters=dict(
-                    min_silence_duration_ms=500,
-                    speech_pad_ms=100
-                )
-            )
-
-            # Combine segments into final transcript
-            transcript = ' '.join(segment.text for segment in segments)
-            
-            # Cache the result
-            st.session_state[cache_key] = transcript
-
+    
+            audio_info = sf.info(audio_path)
+            total_duration = audio_info.duration
+            chunk_duration = 5 * 60  # 5-minute chunks
+            overlap_duration = 10  # 10-second overlap
+    
+            transcripts = []
+            total_chunks = int(np.ceil(total_duration / (chunk_duration - overlap_duration)))
+    
+            with sf.SoundFile(audio_path) as f:
+                for i in range(total_chunks):
+                    if progress_callback:
+                        progress_callback(0.4 + (i / total_chunks) * 0.4,
+                                       f"Transcribing chunk {i + 1}/{total_chunks}...")
+    
+                    # Calculate positions in samples
+                    start_sample = int(i * (chunk_duration - overlap_duration) * f.samplerate)
+                    f.seek(start_sample)
+                    chunk = f.read(frames=int(chunk_duration * f.samplerate))
+    
+                    with temporary_file(suffix=".wav") as chunk_path:
+                        sf.write(chunk_path, chunk, f.samplerate)
+                        # The fix: properly handle the segments from faster-whisper
+                        segments, _ = self.whisper_model.transcribe(chunk_path)
+                        # Combine all segment texts
+                        chunk_text = ' '.join(segment.text for segment in segments)
+                        transcripts.append(chunk_text)
+    
             if progress_callback:
                 progress_callback(1.0, "Transcription complete!")
-
-            return transcript
-
+    
+            return " ".join(transcripts)
+    
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
             raise
-
-    def _merge_transcripts(self, transcripts: List[str]) -> str:
-        """Merge transcripts with overlap deduplication"""
-        if not transcripts:
-            return ""
-        
-        def clean_text(text):
-            # Remove extra spaces and normalize punctuation
-            return ' '.join(text.split())
-        
-        def find_overlap(text1, text2):
-            # Find overlapping text between consecutive chunks
-            words1 = text1.split()
-            words2 = text2.split()
-            
-            for i in range(min(len(words1), 20), 0, -1):  # Check up to 20 words
-                if ' '.join(words1[-i:]) == ' '.join(words2[:i]):
-                    return i
-            return 0
-
-        merged = clean_text(transcripts[0])
-        
-        for i in range(1, len(transcripts)):
-            current = clean_text(transcripts[i])
-            overlap_size = find_overlap(merged, current)
-            merged += ' ' + current.split(' ', overlap_size)[-1]
-        
-        return merged
 
     def calculate_speech_metrics(self, transcript: str, audio_duration: float) -> Dict[str, float]:
         """Calculate words per minute and other speech metrics."""
@@ -1765,7 +1713,7 @@ def main():
             </style>
         """, unsafe_allow_html=True)
 
-        # Sidebar with instructions and status
+        # Sidebar with instructions (only once)
         with st.sidebar:
             st.markdown("""
                 <div class="slide-in">
@@ -1783,9 +1731,8 @@ def main():
             st.markdown("**Supported formats:** MP4, AVI, MOV")
             st.markdown("**Maximum file size:** 500MB")
             
-            # Create a placeholder for status updates in the sidebar
-            status_placeholder = st.empty()
-            status_placeholder.info("Upload a video to begin analysis")
+            st.header("Processing Status")
+            st.info("Upload a video to begin analysis")
 
         # Main title (only once)
         st.markdown("""
@@ -1843,9 +1790,6 @@ def main():
             )
         
         if uploaded_file:
-            # Update status in sidebar
-            status_placeholder.info("Video uploaded, beginning processing...")
-            
             # Add a pulsing animation while processing
             st.markdown("""
                 <div class="pulse" style="text-align: center;">
@@ -1860,8 +1804,6 @@ def main():
             try:
                 # Save uploaded file with progress
                 with st.status("Saving uploaded file...") as status:
-                    # Update sidebar status
-                    status_placeholder.info("Saving uploaded file...")
                     progress_bar = st.progress(0)
                     
                     # Save in chunks to show progress
@@ -1888,9 +1830,6 @@ def main():
                 
                 # Store evaluation results in session state
                 if 'evaluation_results' not in st.session_state:
-                    # Update sidebar status
-                    status_placeholder.info("Processing video and generating analysis...")
-                    
                     # Process video only if results aren't already in session state
                     with st.spinner("Processing video"):
                         evaluator = MentorEvaluator()
@@ -1927,9 +1866,6 @@ def main():
                             # Original flow: full video evaluation
                             st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
                 
-                # Update sidebar status for completion
-                status_placeholder.success("Analysis complete! Review results below.")
-                
                 # Display results using stored evaluation
                 st.success("Analysis complete!")
                 display_evaluation(st.session_state.evaluation_results)
@@ -1958,8 +1894,6 @@ def main():
                         st.success("PDF report downloaded successfully!")
                 
             except Exception as e:
-                # Update sidebar status for error
-                status_placeholder.error(f"Error during processing: {str(e)}")
                 st.error(f"Error during evaluation: {str(e)}")
                 
             finally:
