@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mentor-review-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mentor-review-system
+  template:
+    metadata:
+      labels:
+        app: mentor-review-system
+    spec:
+      containers:
+      - name: mentor-review-system
+        image: mentorreviewacr.azurecr.io/mentor-review-system:latest
+        ports:
+        - containerPort: 8501
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+        env:
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: app-secrets
+              key: openai-api-key
+      nodeSelector:
+        accelerator: nvidia
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mentor-review-system
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 80
+    targetPort: 8501
+  selector:
+    app: mentor-review-system
