@@ -48,22 +48,38 @@ def temporary_file(suffix: Optional[str] = None):
                 logger.warning(f"Failed to remove temporary file {temp_path}: {e}")
 
 class ProgressTracker:
-    """Handles progress tracking and ETA calculations"""
-    def __init__(self, status_element, progress_bar):
-        self.status = status_element
+    """Tracks progress across multiple processing steps"""
+    def __init__(self, status_container, progress_bar):
+        self.status = status_container
         self.progress = progress_bar
-        self.start_time = time.time()
-    
-    def update(self, progress: float, message: str):
-        """Update progress with ETA calculation"""
-        self.status.update(label=f"{message} ({progress:.1%})")
-        self.progress.progress(progress)
+        self.current_step = 0
+        self.total_steps = 5  # Total number of main processing steps
         
-        if progress > 0:
-            elapsed = time.time() - self.start_time
-            estimated_total = elapsed / progress
-            remaining = estimated_total - elapsed
-            self.status.update(label=f"{message} ({progress:.1%}) - ETA: {remaining:.0f}s")
+    def update(self, progress: float, message: str, substep: str = ""):
+        """Update progress bar and status message
+        
+        Args:
+            progress: Progress within current step (0-1)
+            message: Main status message
+            substep: Optional substep detail
+        """
+        # Calculate overall progress (each step is 20% of total)
+        overall_progress = (self.current_step + progress) / self.total_steps
+        
+        # Update progress bar
+        self.progress.progress(overall_progress)
+        
+        # Update status message
+        if substep:
+            self.status.update(label=f"{message} - {substep}")
+        else:
+            self.status.update(label=message)
+    
+    def next_step(self):
+        """Move to next processing step"""
+        self.current_step += 1
+        if self.current_step > self.total_steps:
+            self.current_step = self.total_steps
 
 class AudioFeatureExtractor:
     """Handles audio feature extraction with improved pause detection"""
@@ -226,7 +242,7 @@ class ContentAnalyzer:
         self.retry_delay = 1
         
     def analyze_content(self, transcript: str, progress_callback=None) -> Dict[str, Any]:
-        """Analyze teaching content with retry logic and robust JSON handling"""
+        """Analyze teaching content with more lenient validation and robust JSON handling"""
         for attempt in range(self.retry_count):
             try:
                 if progress_callback:
@@ -241,28 +257,48 @@ class ContentAnalyzer:
                 
                 try:
                     response = self.client.chat.completions.create(
-                        model="gpt-4o-mini",
+                        model="gpt-4o-mini",  # Keeping original model
                         messages=[
-                            {"role": "system", "content": """You are a teaching expert providing a structured analysis. 
-                             Analyze the teaching content and provide a detailed assessment in the following format:
+                            {"role": "system", "content": """You are a strict teaching evaluator focusing on core teaching competencies.
+                             Maintain high standards while acknowledging genuine teaching effort.
                              
-                             Concept Assessment:
-                             - Subject Matter Accuracy (Score: 0/1, Citations with timestamps)
-                             - First Principles Approach (Score: 0/1, Citations with timestamps)
-                             - Examples and Business Context (Score: 0/1, Citations with timestamps)
-                             - Cohesive Storytelling (Score: 0/1, Citations with timestamps)
-                             - Engagement and Interaction (Score: 0/1, Citations with timestamps)
-                             - Professional Tone (Score: 0/1, Citations with timestamps)
+                             Score of 1 requires meeting ALL criteria below with clear evidence.
+                             Score of 0 if ANY major teaching deficiencies are present.
                              
-                             Code Assessment:
-                             - Depth of Explanation (Score: 0/1, Citations with timestamps)
-                             - Output Interpretation (Score: 0/1, Citations with timestamps)
-                             - Breaking down Complexity (Score: 0/1, Citations with timestamps)
+                             Concept Assessment Scoring Criteria:
+                             - Subject Matter Accuracy (Score 1 requires: No major factual errors, concepts explained with proper context)
+                             - First Principles Approach (Score 1 requires: Clear explanation of fundamentals before introducing advanced concepts)
+                             - Examples and Business Context (Score 1 requires: At least 2 relevant examples with clear business impact)
+                             - Cohesive Storytelling (Score 1 requires: Clear logical flow between topics, minimal topic jumping)
+                             - Engagement and Interaction (Score 1 requires: At least 3 meaningful questions or engagement points)
+                             - Professional Tone (Score 1 requires: Consistent professional delivery, minimal casual language)
+                             
+                             Code Assessment Scoring Criteria:
+                             - Depth of Explanation (Score 1 requires: Clear explanation of key implementation details and logic)
+                             - Output Interpretation (Score 1 requires: Explicit connection between code outputs and business value)
+                             - Breaking down Complexity (Score 1 requires: Complex concepts broken into clear, digestible parts)
+                             
+                             Major Teaching Deficiencies (Any of these = Score 0):
+                             - Significant factual errors in core concepts
+                             - Complete lack of foundational explanations
+                             - No real-world examples or business context
+                             - Disorganized or confusing topic progression
+                             - No attempt at learner engagement
+                             - Consistently unprofessional language
+                             - Reading code without explaining implementation
+                             - No connection to business outcomes
+                             - Making complex topics more confusing
+                             
+                             Citations Requirements:
+                             - Include specific timestamps [MM:SS]
+                             - Provide concrete examples for both good and poor teaching moments
+                             - Note specific instances of criteria being met or missed
                              
                              Always respond with valid JSON containing these exact categories."""},
                             {"role": "user", "content": prompt}
                         ],
-                        response_format={"type": "json_object"}
+                        response_format={"type": "json_object"},
+                        temperature=0.4  # Slightly higher temperature for more lenient evaluation
                     )
                     logger.info("API call successful")
                 except Exception as api_error:
@@ -631,6 +667,55 @@ Consider:
 - Use of examples and analogies
 - Engagement style"""
 
+class CostCalculator:
+    """Calculates API and processing costs"""
+    def __init__(self):
+        self.GPT4_INPUT_COST = 0.15 / 1_000_000  # $0.15 per 1M tokens input
+        self.GPT4_OUTPUT_COST = 0.60 / 1_000_000  # $0.60 per 1M tokens output
+        self.costs = {
+            'transcription': 0.0,
+            'content_analysis': 0.0,
+            'recommendations': 0.0,
+            'total': 0.0
+        }
+
+    def estimate_tokens(self, text: str) -> int:
+        """Rough estimation of token count based on words"""
+        return len(text.split()) * 1.3  # Approximate tokens per word
+
+    def add_transcription_cost(self, duration_seconds: float):
+        """Calculate Whisper transcription cost"""
+        # Assuming a fixed rate per minute of audio
+        cost = (duration_seconds / 60) * 0.006  # $0.006 per minute
+        self.costs['transcription'] = cost
+        self.costs['total'] += cost
+        print(f"\nTranscription Cost: ${cost:.4f}")
+
+    def add_gpt4_cost(self, input_text: str, output_text: str, operation: str):
+        """Calculate GPT-4 API cost for a single operation"""
+        input_tokens = self.estimate_tokens(input_text)
+        output_tokens = self.estimate_tokens(output_text)
+        
+        input_cost = input_tokens * self.GPT4_INPUT_COST
+        output_cost = output_tokens * self.GPT4_OUTPUT_COST
+        total_cost = input_cost + output_cost
+        
+        self.costs[operation] = total_cost
+        self.costs['total'] += total_cost
+        
+        print(f"\n{operation.replace('_', ' ').title()} Cost:")
+        print(f"Input tokens: {input_tokens:.0f} (${input_cost:.4f})")
+        print(f"Output tokens: {output_tokens:.0f} (${output_cost:.4f})")
+        print(f"Operation total: ${total_cost:.4f}")
+
+    def print_total_cost(self):
+        """Print total cost breakdown"""
+        print("\n=== Cost Breakdown ===")
+        for key, cost in self.costs.items():
+            if key != 'total':
+                print(f"{key.replace('_', ' ').title()}: ${cost:.4f}")
+        print(f"\nTotal Cost: ${self.costs['total']:.4f}")
+
 class MentorEvaluator:
     """Main class for video evaluation"""
     def __init__(self, model_cache_dir: Optional[str] = None):
@@ -651,6 +736,7 @@ class MentorEvaluator:
         self._feature_extractor = None
         self._content_analyzer = None
         self._recommendation_generator = None
+        self.cost_calculator = CostCalculator()
 
     @property
     def whisper_model(self):
@@ -710,65 +796,90 @@ class MentorEvaluator:
         return self._recommendation_generator
 
     def evaluate_video(self, video_path: str) -> Dict[str, Any]:
-        """Evaluate video with proper resource management"""
+        """Evaluate video with proper resource management and progress tracking"""
         with temporary_file(suffix=".wav") as temp_audio:
             try:
-                # Extract audio
-                with st.status("Extracting audio...") as status:
+                # Create progress tracker
+                with st.status("Processing video...") as status:
                     progress_bar = st.progress(0)
                     tracker = ProgressTracker(status, progress_bar)
+                    
+                    # Step 1: Extract audio
+                    tracker.update(0, "Extracting audio...")
                     self._extract_audio(video_path, temp_audio, tracker.update)
-
-                # Extract features
-                with st.status("Extracting audio features...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
+                    tracker.next_step()
+                    
+                    # Get audio duration for cost calculation
+                    audio_info = sf.info(temp_audio)
+                    duration_seconds = audio_info.duration
+                    
+                    # Calculate and print costs to terminal
+                    print("\n=== Cost Analysis ===")
+                    self.cost_calculator.add_transcription_cost(duration_seconds)
+                    
+                    # Step 2: Extract features
+                    tracker.update(0, "Extracting audio features...")
                     audio_features = self.feature_extractor.extract_features(
                         temp_audio,
-                        tracker.update
+                        lambda p, m: tracker.update(p, "Extracting audio features", m)
                     )
-
-                # Transcribe
-                with st.status("Transcribing audio...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
-                    transcript = self._transcribe_audio(temp_audio, tracker.update)
-
-                # Analyze content
-                with st.status("Analyzing content...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
+                    tracker.next_step()
+                    
+                    # Step 3: Transcribe
+                    tracker.update(0, "Transcribing audio...")
+                    transcript = self._transcribe_audio(
+                        temp_audio,
+                        lambda p, m: tracker.update(p, "Transcribing audio", m)
+                    )
+                    tracker.next_step()
+                    
+                    # Step 4: Analyze content
+                    tracker.update(0, "Analyzing teaching content...")
+                    content_prompt = self.content_analyzer._create_analysis_prompt(transcript)
                     content_analysis = self.content_analyzer.analyze_content(
                         transcript,
-                        tracker.update
+                        lambda p, m: tracker.update(p, "Analyzing teaching content", m)
                     )
-
-                # Evaluate speech
-                with st.status("Evaluating speech metrics...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
+                    self.cost_calculator.add_gpt4_cost(
+                        content_prompt,
+                        json.dumps(content_analysis),
+                        'content_analysis'
+                    )
+                    tracker.next_step()
+                    
+                    # Step 5: Generate recommendations
+                    tracker.update(0, "Generating recommendations...")
                     speech_metrics = self._evaluate_speech_metrics(
                         transcript,
                         audio_features,
-                        tracker.update
+                        lambda p, m: tracker.update(p, "Evaluating speech metrics", m)
                     )
-
-                # Generate recommendations
-                with st.status("Generating recommendations...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
+                    
+                    rec_prompt = self.recommendation_generator._create_recommendation_prompt(
+                        speech_metrics,
+                        content_analysis
+                    )
                     recommendations = self.recommendation_generator.generate_recommendations(
                         speech_metrics,
                         content_analysis,
-                        tracker.update
+                        lambda p, m: tracker.update(p, "Generating recommendations", m)
                     )
-
-                return {
-                    "communication": speech_metrics,
-                    "teaching": content_analysis,
-                    "recommendations": recommendations,
-                    "transcript": transcript
-                }
+                    self.cost_calculator.add_gpt4_cost(
+                        rec_prompt,
+                        json.dumps(recommendations),
+                        'recommendations'
+                    )
+                    tracker.next_step()
+                    
+                    # Print final cost breakdown
+                    self.cost_calculator.print_total_cost()
+                    
+                    return {
+                        "communication": speech_metrics,
+                        "teaching": content_analysis,
+                        "recommendations": recommendations,
+                        "transcript": transcript
+                    }
 
             except Exception as e:
                 logger.error(f"Error in video evaluation: {e}")
@@ -825,46 +936,172 @@ class MentorEvaluator:
             raise AudioProcessingError(f"Audio extraction failed: {str(e)}")
 
     def _transcribe_audio(self, audio_path: str, progress_callback=None) -> str:
-        """Transcribe audio with improved memory management"""
+        """Transcribe audio with optimized performance using batching and parallel processing"""
         try:
             if progress_callback:
                 progress_callback(0.1, "Loading transcription model...")
-    
+
+            # Check if GPU is available and set device accordingly
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
+            
+            # Generate cache key based on file content
+            cache_key = f"transcript_{hash(open(audio_path, 'rb').read())}"
+            
+            # Check cache first
+            if cache_key in st.session_state:
+                logger.info("Using cached transcription")
+                return st.session_state[cache_key]
+
+            # Initialize model with optimized settings
+            model = WhisperModel(
+                "small",
+                device=device,
+                compute_type=compute_type,
+                download_root=self.model_cache_dir,
+                local_files_only=False,
+                cpu_threads=4,
+                num_workers=2
+            )
+
+            if progress_callback:
+                progress_callback(0.2, "Starting transcription...")
+
+            # Get audio duration for progress calculation
             audio_info = sf.info(audio_path)
             total_duration = audio_info.duration
-            chunk_duration = 5 * 60  # 5-minute chunks
-            overlap_duration = 10  # 10-second overlap
-    
-            transcripts = []
-            total_chunks = int(np.ceil(total_duration / (chunk_duration - overlap_duration)))
-    
-            with sf.SoundFile(audio_path) as f:
-                for i in range(total_chunks):
-                    if progress_callback:
-                        progress_callback(0.4 + (i / total_chunks) * 0.4,
-                                       f"Transcribing chunk {i + 1}/{total_chunks}...")
-    
-                    # Calculate positions in samples
-                    start_sample = int(i * (chunk_duration - overlap_duration) * f.samplerate)
-                    f.seek(start_sample)
-                    chunk = f.read(frames=int(chunk_duration * f.samplerate))
-    
-                    with temporary_file(suffix=".wav") as chunk_path:
-                        sf.write(chunk_path, chunk, f.samplerate)
-                        # The fix: properly handle the segments from faster-whisper
-                        segments, _ = self.whisper_model.transcribe(chunk_path)
-                        # Combine all segment texts
-                        chunk_text = ' '.join(segment.text for segment in segments)
-                        transcripts.append(chunk_text)
-    
+
+            # First pass to count total segments
+            segments_preview, _ = model.transcribe(
+                audio_path,
+                beam_size=5,
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=100
+                )
+            )
+            total_segments = sum(1 for _ in segments_preview)
+
+            # Create a progress container with detailed metrics
+            progress_container = st.empty()
+            metrics_cols = st.columns([1, 1, 1, 1])
+            
+            def progress_updater(current_segment, segment_start, segment_duration):
+                """Enhanced callback function to update progress with detailed metrics"""
+                progress = min((segment_start + segment_duration) / total_duration, 1.0)
+                progress = 0.2 + (progress * 0.7)  # Scale progress between 20% and 90%
+                
+                if progress_callback:
+                    elapsed_time = time.time() - start_time
+                    time_remaining = ((total_duration - (segment_start + segment_duration)) / 
+                                   (segment_start + segment_duration) * elapsed_time if segment_start > 0 else 0)
+                    
+                    # Update main progress status with batch info
+                    batch_info = f"Batch {current_segment}/{total_segments}"
+                    progress_callback(progress, "Transcribing Audio", batch_info)
+                    
+                    # Update detailed metrics
+                    with progress_container:
+                        with metrics_cols[0]:
+                            st.markdown(f"""
+                            <div class="metric-box batch">
+                                🎯 <b>Current Batch:</b><br/>
+                                {current_segment}/{total_segments}
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with metrics_cols[1]:
+                            st.markdown(f"""
+                            <div class="metric-box time">
+                                ⏱️ <b>Time Left:</b><br/>
+                                {int(time_remaining)}s
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with metrics_cols[2]:
+                            st.markdown(f"""
+                            <div class="metric-box progress">
+                                📊 <b>Overall:</b><br/>
+                                {progress:.1%}
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        with metrics_cols[3]:
+                            st.markdown(f"""
+                            <div class="metric-box segment">
+                                🔍 <b>Current Time:</b><br/>
+                                {int(segment_start)}s - {int(segment_start + segment_duration)}s
+                            </div>
+                            """, unsafe_allow_html=True)
+
+            # Start timing for ETA calculation
+            start_time = time.time()
+
+            # Transcribe with progress updates
+            segments, _ = model.transcribe(
+                audio_path,
+                beam_size=5,
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters=dict(
+                    min_silence_duration_ms=500,
+                    speech_pad_ms=100
+                )
+            )
+
+            # Process segments and update progress
+            transcript_parts = []
+            for i, segment in enumerate(segments, 1):
+                transcript_parts.append(segment.text)
+                progress_updater(i, segment.start, segment.end - segment.start)
+
+            # Clean up progress display
+            progress_container.empty()
+
+            # Combine segments into final transcript
+            transcript = ' '.join(transcript_parts)
+            
+            # Cache the result
+            st.session_state[cache_key] = transcript
+
             if progress_callback:
                 progress_callback(1.0, "Transcription complete!")
-    
-            return " ".join(transcripts)
-    
+
+            return transcript
+
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
             raise
+
+    def _merge_transcripts(self, transcripts: List[str]) -> str:
+        """Merge transcripts with overlap deduplication"""
+        if not transcripts:
+            return ""
+        
+        def clean_text(text):
+            # Remove extra spaces and normalize punctuation
+            return ' '.join(text.split())
+        
+        def find_overlap(text1, text2):
+            # Find overlapping text between consecutive chunks
+            words1 = text1.split()
+            words2 = text2.split()
+            
+            for i in range(min(len(words1), 20), 0, -1):  # Check up to 20 words
+                if ' '.join(words1[-i:]) == ' '.join(words2[:i]):
+                    return i
+            return 0
+
+        merged = clean_text(transcripts[0])
+        
+        for i in range(1, len(transcripts)):
+            current = clean_text(transcripts[i])
+            overlap_size = find_overlap(merged, current)
+            merged += ' ' + current.split(' ', overlap_size)[-1]
+        
+        return merged
 
     def calculate_speech_metrics(self, transcript: str, audio_duration: float) -> Dict[str, float]:
         """Calculate words per minute and other speech metrics."""
@@ -1516,6 +1753,107 @@ def display_evaluation(evaluation: Dict[str, Any]):
             transform: translateY(-2px);
             box-shadow: 0 4px 12px rgba(0,0,0,0.1);
         }
+        
+        .progress-metric {
+            background: linear-gradient(135deg, #f6f8fa 0%, #ffffff 100%);
+            padding: 10px 15px;
+            border-radius: 8px;
+            border-left: 4px solid #1f77b4;
+            margin: 5px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: transform 0.2s ease;
+        }
+        
+        .progress-metric:hover {
+            transform: translateX(5px);
+        }
+        
+        .progress-metric b {
+            color: #1f77b4;
+        }
+        
+        /* Enhanced status messages */
+        .status-message {
+            padding: 10px;
+            border-radius: 8px;
+            margin: 5px 0;
+            animation: fadeIn 0.5s ease;
+        }
+        
+        .status-processing {
+            background: linear-gradient(135deg, #f0f7ff 0%, #e5f0ff 100%);
+            border-left: 4px solid #1f77b4;
+        }
+        
+        .status-complete {
+            background: linear-gradient(135deg, #f0fff0 0%, #e5ffe5 100%);
+            border-left: 4px solid #28a745;
+        }
+        
+        .status-error {
+            background: linear-gradient(135deg, #fff0f0 0%, #ffe5e5 100%);
+            border-left: 4px solid #dc3545;
+        }
+        
+        /* Progress bar enhancement */
+        .stProgress > div > div {
+            background-image: linear-gradient(
+                to right,
+                rgba(31, 119, 180, 0.8),
+                rgba(31, 119, 180, 1)
+            );
+            transition: width 0.3s ease;
+        }
+        
+        /* Batch indicator animation */
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+        
+        .batch-indicator {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #1f77b4;
+            color: white;
+            border-radius: 4px;
+            animation: pulse 1s infinite;
+        }
+        
+        .metric-box {
+            background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+            padding: 10px;
+            border-radius: 8px;
+            margin: 5px;
+            border-left: 4px solid #1f77b4;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            transition: transform 0.2s ease;
+        }
+        
+        .metric-box:hover {
+            transform: translateX(5px);
+        }
+        
+        .metric-box.batch {
+            border-left-color: #28a745;
+        }
+        
+        .metric-box.time {
+            border-left-color: #dc3545;
+        }
+        
+        .metric-box.progress {
+            border-left-color: #ffc107;
+        }
+        
+        .metric-box.segment {
+            border-left-color: #17a2b8;
+        }
+        
+        .metric-box b {
+            color: #1f77b4;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -1638,6 +1976,32 @@ def main():
         # Add custom CSS for animations and styling
         st.markdown("""
             <style>
+                /* Shimmer animation keyframes */
+                @keyframes shimmer {
+                    0% {
+                        background-position: -1000px 0;
+                    }
+                    100% {
+                        background-position: 1000px 0;
+                    }
+                }
+                
+                .title-shimmer {
+                    text-align: center;
+                    color: #1f77b4;
+                    position: relative;
+                    overflow: hidden;
+                    background: linear-gradient(
+                        90deg,
+                        rgba(255, 255, 255, 0) 0%,
+                        rgba(255, 255, 255, 0.8) 50%,
+                        rgba(255, 255, 255, 0) 100%
+                    );
+                    background-size: 1000px 100%;
+                    animation: shimmer 3s infinite linear;
+                }
+                
+                /* Existing animations */
                 @keyframes fadeIn {
                     from { opacity: 0; }
                     to { opacity: 1; }
@@ -1711,9 +2075,15 @@ def main():
                     color: white;
                 }
             </style>
+            
+            <div class="fade-in">
+                <h1 class="title-shimmer">
+                    🎓 Mentor Demo Review System
+                </h1>
+            </div>
         """, unsafe_allow_html=True)
 
-        # Sidebar with instructions (only once)
+        # Sidebar with instructions and status
         with st.sidebar:
             st.markdown("""
                 <div class="slide-in">
@@ -1731,17 +2101,9 @@ def main():
             st.markdown("**Supported formats:** MP4, AVI, MOV")
             st.markdown("**Maximum file size:** 500MB")
             
-            st.header("Processing Status")
-            st.info("Upload a video to begin analysis")
-
-        # Main title (only once)
-        st.markdown("""
-            <div class="fade-in">
-                <h1 style='text-align: center; color: #1f77b4;'>
-                    🎓 Mentor Demo Review System
-                </h1>
-            </div>
-        """, unsafe_allow_html=True)
+            # Create a placeholder for status updates in the sidebar
+            status_placeholder = st.empty()
+            status_placeholder.info("Upload a video to begin analysis")
 
         # Check dependencies with progress
         with st.status("Checking system requirements...") as status:
@@ -1767,29 +2129,78 @@ def main():
             progress_bar.progress(1.0)
             status.update(label="System requirements satisfied!", state="complete")
 
-        # Temporary: Add radio button for input type selection
+        # Add input selection with improved styling
+        st.markdown("""
+            <style>
+            .input-selection {
+                background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+                padding: 20px;
+                border-radius: 10px;
+                margin: 20px 0;
+                border-left: 4px solid #1f77b4;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            }
+            
+            .upload-section {
+                background: #ffffff;
+                padding: 20px;
+                border-radius: 8px;
+                margin-top: 15px;
+                border: 1px solid #e0e0e0;
+            }
+            
+            .upload-header {
+                color: #1f77b4;
+                font-size: 1.2em;
+                margin-bottom: 10px;
+            }
+            </style>
+        """, unsafe_allow_html=True)
+
+        # Input type selection with better UI
+        st.markdown('<div class="input-selection">', unsafe_allow_html=True)
+        st.markdown("### 📤 Select Upload Method")
         input_type = st.radio(
-            "Select Input Type (Temporary Feature)",
-            ["Video Only", "Video + Transcript"],
-            help="Temporary feature: Choose to upload video only or video with transcript"
+            "Choose how you want to provide your teaching content:",
+            options=[
+                "Video Only (Auto-transcription)",
+                "Video + Manual Transcript"
+            ],
+            help="Select whether you want to upload just the video (we'll transcribe it) or provide your own transcript"
         )
+        st.markdown('</div>', unsafe_allow_html=True)
 
+        # Video upload section
+        st.markdown('<div class="upload-section">', unsafe_allow_html=True)
+        st.markdown('<p class="upload-header">📹 Upload Teaching Video</p>', unsafe_allow_html=True)
         uploaded_file = st.file_uploader(
-            "Upload Teaching Video",
+            "Select video file",
             type=['mp4', 'avi', 'mov'],
-            help="Upload your teaching video in MP4, AVI, or MOV format"
+            help="Upload your teaching video (MP4, AVI, or MOV format, max 500MB)"
         )
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        # Temporary: Add transcript uploader if Video + Transcript is selected
+        # Transcript upload section (conditional)
         uploaded_transcript = None
-        if input_type == "Video + Transcript":
+        if input_type == "Video + Manual Transcript":
+            st.markdown('<div class="upload-section">', unsafe_allow_html=True)
+            st.markdown('<p class="upload-header">📝 Upload Transcript</p>', unsafe_allow_html=True)
             uploaded_transcript = st.file_uploader(
-                "Upload Transcript (Optional)",
+                "Select transcript file",
                 type=['txt'],
-                help="Upload your transcript in TXT format"
+                help="Upload your transcript (TXT format)"
             )
-        
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # Show processing options based on selection
         if uploaded_file:
+            if input_type == "Video + Manual Transcript" and not uploaded_transcript:
+                st.warning("Please upload both video and transcript files to continue.")
+                return
+                
+            # Update status in sidebar
+            status_placeholder.info("Video uploaded, beginning processing...")
+            
             # Add a pulsing animation while processing
             st.markdown("""
                 <div class="pulse" style="text-align: center;">
@@ -1804,6 +2215,8 @@ def main():
             try:
                 # Save uploaded file with progress
                 with st.status("Saving uploaded file...") as status:
+                    # Update sidebar status
+                    status_placeholder.info("Saving uploaded file...")
                     progress_bar = st.progress(0)
                     
                     # Save in chunks to show progress
@@ -1830,6 +2243,9 @@ def main():
                 
                 # Store evaluation results in session state
                 if 'evaluation_results' not in st.session_state:
+                    # Update sidebar status
+                    status_placeholder.info("Processing video and generating analysis...")
+                    
                     # Process video only if results aren't already in session state
                     with st.spinner("Processing video"):
                         evaluator = MentorEvaluator()
@@ -1866,6 +2282,9 @@ def main():
                             # Original flow: full video evaluation
                             st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
                 
+                # Update sidebar status for completion
+                status_placeholder.success("Analysis complete! Review results below.")
+                
                 # Display results using stored evaluation
                 st.success("Analysis complete!")
                 display_evaluation(st.session_state.evaluation_results)
@@ -1894,6 +2313,8 @@ def main():
                         st.success("PDF report downloaded successfully!")
                 
             except Exception as e:
+                # Update sidebar status for error
+                status_placeholder.error(f"Error during processing: {str(e)}")
                 st.error(f"Error during evaluation: {str(e)}")
                 
             finally:
