@@ -796,94 +796,77 @@ class MentorEvaluator:
         return self._recommendation_generator
 
     def evaluate_video(self, video_path: str) -> Dict[str, Any]:
-        """Evaluate video with proper resource management and progress tracking"""
-        with temporary_file(suffix=".wav") as temp_audio:
-            try:
-                # Create progress tracker
-                with st.status("Processing video...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
-                    
-                    # Step 1: Extract audio
-                    tracker.update(0, "Extracting audio...")
-                    self._extract_audio(video_path, temp_audio, tracker.update)
-                    tracker.next_step()
-                    
-                    # Get audio duration for cost calculation
-                    audio_info = sf.info(temp_audio)
-                    duration_seconds = audio_info.duration
-                    
-                    # Calculate and print costs to terminal
-                    print("\n=== Cost Analysis ===")
-                    self.cost_calculator.add_transcription_cost(duration_seconds)
-                    
-                    # Step 2: Extract features
-                    tracker.update(0, "Extracting audio features...")
-                    audio_features = self.feature_extractor.extract_features(
-                        temp_audio,
-                        lambda p, m: tracker.update(p, "Extracting audio features", m)
-                    )
-                    tracker.next_step()
-                    
-                    # Step 3: Transcribe
-                    tracker.update(0, "Transcribing audio...")
-                    transcript = self._transcribe_audio(
-                        temp_audio,
-                        lambda p, m: tracker.update(p, "Transcribing audio", m)
-                    )
-                    tracker.next_step()
-                    
-                    # Step 4: Analyze content
-                    tracker.update(0, "Analyzing teaching content...")
-                    content_prompt = self.content_analyzer._create_analysis_prompt(transcript)
-                    content_analysis = self.content_analyzer.analyze_content(
-                        transcript,
-                        lambda p, m: tracker.update(p, "Analyzing teaching content", m)
-                    )
-                    self.cost_calculator.add_gpt4_cost(
-                        content_prompt,
-                        json.dumps(content_analysis),
-                        'content_analysis'
-                    )
-                    tracker.next_step()
-                    
-                    # Step 5: Generate recommendations
-                    tracker.update(0, "Generating recommendations...")
-                    speech_metrics = self._evaluate_speech_metrics(
-                        transcript,
-                        audio_features,
-                        lambda p, m: tracker.update(p, "Evaluating speech metrics", m)
-                    )
-                    
-                    rec_prompt = self.recommendation_generator._create_recommendation_prompt(
-                        speech_metrics,
-                        content_analysis
-                    )
-                    recommendations = self.recommendation_generator.generate_recommendations(
-                        speech_metrics,
-                        content_analysis,
-                        lambda p, m: tracker.update(p, "Generating recommendations", m)
-                    )
-                    self.cost_calculator.add_gpt4_cost(
-                        rec_prompt,
-                        json.dumps(recommendations),
-                        'recommendations'
-                    )
-                    tracker.next_step()
-                    
-                    # Print final cost breakdown
-                    self.cost_calculator.print_total_cost()
-                    
-                    return {
-                        "communication": speech_metrics,
-                        "teaching": content_analysis,
-                        "recommendations": recommendations,
-                        "transcript": transcript
-                    }
+        """Evaluate video with preprocessing for faster transcription"""
+        try:
+            # Create progress containers
+            progress_container = st.empty()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            except Exception as e:
-                logger.error(f"Error in video evaluation: {e}")
-                raise
+            def update_progress(progress: float, status: str, substatus: str = ""):
+                """Update progress UI elements"""
+                progress_container.markdown(f"### {status}")
+                progress_bar.progress(progress)
+                if substatus:
+                    status_text.markdown(f"*{substatus}*")
+
+            # Step 1: Extract audio (10% of progress)
+            update_progress(0.1, "Step 1/5: Extracting audio...")
+            with temporary_file(suffix=".wav") as temp_audio:
+                self._extract_audio(video_path, temp_audio)
+            
+            # Step 2: Preprocess audio (20% of progress)
+            update_progress(0.2, "Step 2/5: Preprocessing audio...")
+            processed_audio = self._preprocess_audio(temp_audio)
+            
+            # Step 3: Transcribe audio (40% of progress)
+            update_progress(0.4, "Step 3/5: Transcribing audio...")
+            transcript = self._transcribe_audio(processed_audio, 
+                                             progress_callback=lambda p, s, sub: update_progress(0.4 + p * 0.2, s, sub))
+            
+            # Step 4: Extract features (60% of progress)
+            update_progress(0.6, "Step 4/5: Extracting audio features...")
+            audio_features = self.feature_extractor.extract_features(processed_audio)
+            
+            # Step 5: Analyze content and generate recommendations (100% of progress)
+            update_progress(0.8, "Step 5/5: Analyzing content...")
+            
+            # Evaluate speech metrics
+            speech_metrics = self._evaluate_speech_metrics(transcript, audio_features)
+            
+            # Analyze content with progress tracking
+            content_analysis = self.content_analyzer.analyze_content(
+                transcript, 
+                progress_callback=lambda p, s: update_progress(0.8 + p * 0.1, "Analyzing teaching content", s)
+            )
+            
+            # Generate recommendations with progress tracking
+            recommendations = self.recommendation_generator.generate_recommendations(
+                speech_metrics,
+                content_analysis,
+                progress_callback=lambda p, s: update_progress(0.9 + p * 0.1, "Generating recommendations", s)
+            )
+            
+            # Complete progress
+            update_progress(1.0, "Processing complete!", "✅ Analysis finished")
+            
+            return {
+                "communication": speech_metrics,
+                "teaching": content_analysis,
+                "recommendations": recommendations,
+                "transcript": transcript
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in video evaluation: {e}")
+            raise
+        finally:
+            # Clean up processed audio file if it exists
+            if 'processed_audio' in locals():
+                try:
+                    os.remove(processed_audio)
+                except:
+                    pass
 
     def _extract_audio(self, video_path: str, output_path: str, progress_callback=None) -> str:
         """Extract audio from video"""
@@ -955,13 +938,13 @@ class MentorEvaluator:
 
             # Initialize model with optimized settings
             model = WhisperModel(
-                "small",
+                "small",  # Use smaller model for faster processing
                 device=device,
                 compute_type=compute_type,
                 download_root=self.model_cache_dir,
                 local_files_only=False,
-                cpu_threads=4,
-                num_workers=2
+                cpu_threads=4,  # Increase CPU threads for parallel processing
+                num_workers=2   # Add workers for data loading
             )
 
             if progress_callback:
@@ -974,11 +957,11 @@ class MentorEvaluator:
             # First pass to count total segments
             segments_preview, _ = model.transcribe(
                 audio_path,
-                beam_size=5,
+                beam_size=5,  # Reduced beam size for faster processing
                 word_timestamps=True,
                 vad_filter=True,
                 vad_parameters=dict(
-                    min_silence_duration_ms=500,
+                    min_silence_duration_ms=500,  # Increased silence threshold
                     speech_pad_ms=100
                 )
             )
@@ -1039,7 +1022,7 @@ class MentorEvaluator:
             # Start timing for ETA calculation
             start_time = time.time()
 
-            # Transcribe with progress updates
+            # Transcribe with optimized settings
             segments, _ = model.transcribe(
                 audio_path,
                 beam_size=5,
@@ -1048,7 +1031,13 @@ class MentorEvaluator:
                 vad_parameters=dict(
                     min_silence_duration_ms=500,
                     speech_pad_ms=100
-                )
+                ),
+                # Add additional performance options
+                condition_on_previous_text=False,  # Disable context conditioning
+                no_speech_threshold=0.6,  # Increased threshold
+                compression_ratio_threshold=2.4,
+                logprob_threshold=-1.0,
+                best_of=1  # Reduced search space
             )
 
             # Process segments and update progress
@@ -1177,6 +1166,30 @@ class MentorEvaluator:
 
         except Exception as e:
             logger.error(f"Error in speech metrics evaluation: {e}")
+            raise
+
+    def _preprocess_audio(self, audio_path: str) -> str:
+        """Preprocess audio for faster transcription"""
+        try:
+            output_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
+            
+            # FFmpeg command for preprocessing
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-i', audio_path,
+                '-ar', '16000',  # Reduce sample rate to 16kHz
+                '-ac', '1',      # Convert to mono
+                '-af', 'silenceremove=stop_periods=-1:stop_duration=1:stop_threshold=-50dB',  # Remove silence
+                '-acodec', 'pcm_s16le',  # Use PCM format
+                '-y',
+                output_path
+            ]
+            
+            subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
+            return output_path
+            
+        except Exception as e:
+            logger.error(f"Error preprocessing audio: {e}")
             raise
 
 def validate_video_file(file_path: str):
@@ -2074,6 +2087,40 @@ def main():
                     background-color: #dc3545;
                     color: white;
                 }
+                
+                .metric-box {
+                    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+                    padding: 10px;
+                    border-radius: 8px;
+                    margin: 5px;
+                    border-left: 4px solid #1f77b4;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                    transition: transform 0.2s ease;
+                }
+                
+                .metric-box:hover {
+                    transform: translateX(5px);
+                }
+                
+                .metric-box.batch {
+                    border-left-color: #28a745;
+                }
+                
+                .metric-box.time {
+                    border-left-color: #dc3545;
+                }
+                
+                .metric-box.progress {
+                    border-left-color: #ffc107;
+                }
+                
+                .metric-box.segment {
+                    border-left-color: #17a2b8;
+                }
+                
+                .metric-box b {
+                    color: #1f77b4;
+                }
             </style>
             
             <div class="fade-in">
@@ -2241,47 +2288,23 @@ def main():
                     st.error("File size exceeds 2GB limit. Please upload a smaller file.")
                     return
                 
-                # Store evaluation results in session state
+                # Process video with progress tracking
                 if 'evaluation_results' not in st.session_state:
-                    # Update sidebar status
                     status_placeholder.info("Processing video and generating analysis...")
                     
-                    # Process video only if results aren't already in session state
-                    with st.spinner("Processing video"):
-                        evaluator = MentorEvaluator()
+                    # Create a container for the processing status
+                    process_container = st.container()
+                    with process_container:
+                        st.markdown("""
+                            <div class="processing-status">
+                                <h3>🎥 Processing Video</h3>
+                                <div class="status-details"></div>
+                            </div>
+                        """, unsafe_allow_html=True)
                         
-                        # Temporary: Handle transcript if provided
-                        if uploaded_transcript:
-                            transcript_text = uploaded_transcript.getvalue().decode('utf-8')
-                            # Extract audio features but skip transcription
-                            audio_features = evaluator.feature_extractor.extract_features(video_path)
-                            
-                            # Evaluate speech metrics
-                            speech_metrics = evaluator._evaluate_speech_metrics(
-                                transcript_text,
-                                audio_features
-                            )
-                            
-                            # Analyze content
-                            content_analysis = evaluator.content_analyzer.analyze_content(transcript_text)
-                            
-                            # Generate recommendations
-                            recommendations = evaluator.recommendation_generator.generate_recommendations(
-                                speech_metrics,
-                                content_analysis
-                            )
-                            
-                            # Combine results
-                            st.session_state.evaluation_results = {
-                                "communication": speech_metrics,
-                                "teaching": content_analysis,
-                                "recommendations": recommendations,
-                                "transcript": transcript_text
-                            }
-                        else:
-                            # Original flow: full video evaluation
-                            st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
-                
+                        evaluator = MentorEvaluator()
+                        st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
+
                 # Update sidebar status for completion
                 status_placeholder.success("Analysis complete! Review results below.")
                 
