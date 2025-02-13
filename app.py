@@ -242,63 +242,63 @@ class ContentAnalyzer:
         self.retry_delay = 1
         
     def analyze_content(self, transcript: str, progress_callback=None) -> Dict[str, Any]:
-        """Analyze teaching content with more lenient validation and robust JSON handling"""
+        """Analyze teaching content with strict validation and robust JSON handling"""
         for attempt in range(self.retry_count):
             try:
                 if progress_callback:
                     progress_callback(0.2, "Preparing content analysis...")
                 
+                # Remove any truncation of transcript - pass full text to API
                 prompt = self._create_analysis_prompt(transcript)
-                logger.info(f"Attempt {attempt + 1}: Sending analysis request")
-                logger.info(f"Transcript length: {len(transcript)} characters")
+                logger.info(f"Sending full transcript of length: {len(transcript)} characters")
                 
                 if progress_callback:
                     progress_callback(0.5, "Processing with AI model...")
                 
                 try:
                     response = self.client.chat.completions.create(
-                        model="gpt-4o-mini",  # Keeping original model
+                        model="gpt-4o-mini",
                         messages=[
                             {"role": "system", "content": """You are a strict teaching evaluator focusing on core teaching competencies.
-                             Maintain high standards while acknowledging genuine teaching effort.
+                             Maintain high standards and require clear evidence of quality teaching.
                              
                              Score of 1 requires meeting ALL criteria below with clear evidence.
-                             Score of 0 if ANY major teaching deficiencies are present.
+                             Score of 0 if ANY major teaching deficiency is present.
                              
                              Concept Assessment Scoring Criteria:
-                             - Subject Matter Accuracy (Score 1 requires: No major factual errors, concepts explained with proper context)
-                             - First Principles Approach (Score 1 requires: Clear explanation of fundamentals before introducing advanced concepts)
-                             - Examples and Business Context (Score 1 requires: At least 2 relevant examples with clear business impact)
-                             - Cohesive Storytelling (Score 1 requires: Clear logical flow between topics, minimal topic jumping)
-                             - Engagement and Interaction (Score 1 requires: At least 3 meaningful questions or engagement points)
-                             - Professional Tone (Score 1 requires: Consistent professional delivery, minimal casual language)
+                             - Subject Matter Accuracy (Score 1 requires: Completely accurate information, no errors)
+                             - First Principles Approach (Score 1 requires: Clear explanation of fundamentals before complex topics)
+                             - Examples and Business Context (Score 1 requires: At least 2 relevant examples with business context)
+                             - Cohesive Storytelling (Score 1 requires: Clear logical flow with smooth transitions)
+                             - Engagement and Interaction (Score 1 requires: At least 3 engagement points or questions)
+                             - Professional Tone (Score 1 requires: Consistently professional delivery)
                              
                              Code Assessment Scoring Criteria:
-                             - Depth of Explanation (Score 1 requires: Clear explanation of key implementation details and logic)
-                             - Output Interpretation (Score 1 requires: Explicit connection between code outputs and business value)
-                             - Breaking down Complexity (Score 1 requires: Complex concepts broken into clear, digestible parts)
+                             - Depth of Explanation (Score 1 requires: Thorough explanation of implementation details)
+                             - Output Interpretation (Score 1 requires: Clear connection between code outputs and business value)
+                             - Breaking down Complexity (Score 1 requires: Systematic breakdown of complex concepts)
                              
-                             Major Teaching Deficiencies (Any of these = Score 0):
-                             - Significant factual errors in core concepts
-                             - Complete lack of foundational explanations
-                             - No real-world examples or business context
-                             - Disorganized or confusing topic progression
-                             - No attempt at learner engagement
-                             - Consistently unprofessional language
-                             - Reading code without explaining implementation
-                             - No connection to business outcomes
-                             - Making complex topics more confusing
+                             Major Teaching Deficiencies (ANY of these results in Score 0):
+                             - Any factual errors
+                             - Missing foundational explanations
+                             - Insufficient examples or business context
+                             - Disorganized presentation
+                             - Limited learner engagement
+                             - Unprofessional language
+                             - Superficial code explanation
+                             - Missing business context
+                             - Poor complexity management
                              
                              Citations Requirements:
                              - Include specific timestamps [MM:SS]
-                             - Provide concrete examples for both good and poor teaching moments
+                             - Provide examples for both good and poor teaching moments
                              - Note specific instances of criteria being met or missed
                              
                              Always respond with valid JSON containing these exact categories."""},
                             {"role": "user", "content": prompt}
                         ],
                         response_format={"type": "json_object"},
-                        temperature=0.4  # Slightly higher temperature for more lenient evaluation
+                        temperature=0.3 # Lower temperature for stricter evaluation
                     )
                     logger.info("API call successful")
                 except Exception as api_error:
@@ -381,54 +381,81 @@ class ContentAnalyzer:
                 time.sleep(self.retry_delay * (2 ** attempt))
 
     def _create_analysis_prompt(self, transcript: str) -> str:
-        """Create the analysis prompt"""
-        prompt_template = """Analyze this teaching content and provide detailed assessment with timestamps:
+        """Create the analysis prompt with smart timestamp handling"""
+        # First try to extract existing timestamps
+        timestamps = re.findall(r'\[(\d{2}:\d{2})\]', transcript)
+        
+        if timestamps:
+            # Use existing timestamps
+            timestamp_instruction = f"""Use the EXACT timestamps from the transcript (e.g. {', '.join(timestamps[:3])}).
+Do not create new timestamps."""
+        else:
+            # Calculate approximate timestamps based on word position
+            words_per_minute = 150  # average speaking rate
+            timestamp_instruction = """Generate timestamps based on word position:
+1. Count words from start of transcript
+2. Calculate time: (word_count / 150) minutes
+3. Format as [MM:SS]
+Example: If a quote starts at word 300, timestamp would be [02:00] (300 words / 150 words per minute)"""
+            
+            # Add word position markers to help with timestamp calculation
+            words = transcript.split()
+            marked_transcript = ""
+            for i, word in enumerate(words):
+                if i % 150 == 0:  # Add marker every ~1 minute of speech
+                    minutes = i // 150
+                    marked_transcript += f"\n[{minutes:02d}:00] "
+                marked_transcript += word + " "
+            transcript = marked_transcript
 
-Transcript: {transcript}
+        prompt_template = """Analyze this teaching content and provide detailed assessment.
 
-Provide a detailed assessment in JSON format with scores (0 or 1) and timestamped citations for each category.
-If score is 0, citations should point out problems. If score is 1, citations should highlight good examples.
+Transcript:
+{transcript}
+
+Timestamp Instructions:
+{timestamp_instruction}
 
 Required JSON structure:
 {{
     "Concept Assessment": {{
         "Subject Matter Accuracy": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "First Principles Approach": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "Examples and Business Context": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "Cohesive Storytelling": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "Engagement and Interaction": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "Professional Tone": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }}
     }},
     "Code Assessment": {{
         "Depth of Explanation": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "Output Interpretation": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }},
         "Breaking down Complexity": {{
             "Score": 1,
-            "Citations": ["[MM:SS] Example citation"]
+            "Citations": ["[MM:SS] Quote from transcript"]
         }}
     }}
 }}
@@ -445,12 +472,14 @@ Evaluation Criteria:
 - Breaking down Complexity: Assess ability to simplify complex concepts
 
 Important:
-- Include timestamps in [MM:SS] format
-- Provide specific citations from the transcript
-- Use only Score values of 0 or 1
-- Include at least one citation for each category"""
+- Each citation must include a timestamp and relevant quote
+- Citations should highlight specific examples of criteria being met or missed
+- Use only Score values of 0 or 1"""
 
-        return prompt_template.format(transcript=transcript)
+        return prompt_template.format(
+            transcript=transcript,
+            timestamp_instruction=timestamp_instruction
+        )
 
     def _evaluate_speech_metrics(self, transcript: str, audio_features: Dict[str, float], 
                            progress_callback=None) -> Dict[str, Any]:
@@ -499,12 +528,14 @@ Important:
                 },
                 "intonation": {
                     "pitch": float(audio_features.get("pitch_mean", 0)),
-                    "pitchScore": 1 if 20 <= float(audio_features.get("pitch_std", 0)) / float(audio_features.get("pitch_mean", 1)) * 100 <= 40 else 0,  # Updated pitch variation range
+                    "pitchScore": 1 if 20 <= float(audio_features.get("pitch_std", 0)) / float(audio_features.get("pitch_mean", 1)) * 100 <= 40 else 0,
                     "pitchVariation": float(audio_features.get("pitch_std", 0)),
-                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 8 else 0,  # Updated minimum variations
+                    # Update variations threshold from 8 to 100
+                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 100 else 0,  # Updated from >= 8
                     "risingPatterns": int(audio_features.get("rising_patterns", 0)),
                     "fallingPatterns": int(audio_features.get("falling_patterns", 0)),
-                    "variationsPerMin": float(audio_features.get("variations_per_minute", 0))
+                    "variationsPerMin": float(audio_features.get("variations_per_minute", 0)),
+                    "mu": float(audio_features.get("pitch_mean", 0))
                 },
                 "energy": {
                     "score": 1 if 60 <= mean_amplitude <= 75 else 0,  # Updated amplitude range for teaching
@@ -594,13 +625,15 @@ Metrics: {json.dumps(metrics)}
 Content Analysis: {json.dumps(content_analysis)}
 
 Analyze the teaching style and provide:
-1. Geography fit assessment
-2. Specific improvements needed
-3. Profile matching for different learner types (choose ONLY ONE best match)
-4. Overall teaching rigor assessment
+1. A concise performance summary (2-3 paragraphs highlighting key strengths and areas for improvement)
+2. Geography fit assessment
+3. Specific improvements needed
+4. Profile matching for different learner types (choose ONLY ONE best match)
+5. Overall teaching rigor assessment
 
 Required JSON structure:
 {{
+    "summary": "Comprehensive summary of teaching performance, strengths, and areas for improvement",
     "geographyFit": "String describing geographical market fit",
     "improvements": [
         "Array of specific improvement recommendations"
@@ -630,48 +663,21 @@ Required JSON structure:
     ]
 }}
 
-IMPORTANT: Set match=true for ONLY ONE profile that best matches the teaching style. 
-All other profiles should have match=false with explanations of why they're not the best fit.
-
-Profile Definitions:
-- junior_technical: Low Programming Ex + Low Work Ex
-- senior_non_technical: Low Programming Ex + High Work Ex
-- junior_expert: High Programming Ex + Low Work Ex
-- senior_expert: High Programming Ex + High Work Ex
-
-Evaluation Criteria for Best Match:
-1. Teaching Pace:
-   - junior_technical/senior_non_technical: Needs slower, detailed explanations
-   - junior_expert/senior_expert: Can handle faster, more concise delivery
-
-2. Technical Depth:
-   - junior_technical: Basic concepts with lots of examples
-   - senior_non_technical: Business context with technical foundations
-   - junior_expert: Advanced concepts with implementation details
-   - senior_expert: Complex systems and architectural considerations
-
-3. Business Context:
-   - junior_technical/junior_expert: Less emphasis needed
-   - senior_non_technical/senior_expert: Strong business context required
-
-4. Code Explanation:
-   - junior_technical: Step-by-step, basic syntax
-   - senior_non_technical: High-level overview with business impact
-   - junior_expert: Implementation details and best practices
-   - senior_expert: Architecture patterns and system design
-
 Consider:
 - Teaching pace and complexity level
 - Balance of technical vs business context
 - Depth of code explanations
 - Use of examples and analogies
-- Engagement style"""
+- Engagement style
+- Communication metrics
+- Teaching assessment scores"""
 
 class CostCalculator:
     """Calculates API and processing costs"""
     def __init__(self):
         self.GPT4_INPUT_COST = 0.15 / 1_000_000  # $0.15 per 1M tokens input
         self.GPT4_OUTPUT_COST = 0.60 / 1_000_000  # $0.60 per 1M tokens output
+        self.WHISPER_COST = 0.006 / 60  # $0.006 per minute
         self.costs = {
             'transcription': 0.0,
             'content_analysis': 0.0,
@@ -685,8 +691,7 @@ class CostCalculator:
 
     def add_transcription_cost(self, duration_seconds: float):
         """Calculate Whisper transcription cost"""
-        # Assuming a fixed rate per minute of audio
-        cost = (duration_seconds / 60) * 0.006  # $0.006 per minute
+        cost = (duration_seconds / 60) * self.WHISPER_COST
         self.costs['transcription'] = cost
         self.costs['total'] += cost
         print(f"\nTranscription Cost: ${cost:.4f}")
@@ -736,7 +741,7 @@ class MentorEvaluator:
         self._feature_extractor = None
         self._content_analyzer = None
         self._recommendation_generator = None
-        self.cost_calculator = CostCalculator()
+        self.cost_calculator = CostCalculator()  # Add cost calculator instance
 
     @property
     def whisper_model(self):
@@ -795,95 +800,103 @@ class MentorEvaluator:
             self._recommendation_generator = RecommendationGenerator(api_key=self.api_key)
         return self._recommendation_generator
 
-    def evaluate_video(self, video_path: str) -> Dict[str, Any]:
-        """Evaluate video with proper resource management and progress tracking"""
-        with temporary_file(suffix=".wav") as temp_audio:
-            try:
-                # Create progress tracker
-                with st.status("Processing video...") as status:
-                    progress_bar = st.progress(0)
-                    tracker = ProgressTracker(status, progress_bar)
-                    
-                    # Step 1: Extract audio
-                    tracker.update(0, "Extracting audio...")
-                    self._extract_audio(video_path, temp_audio, tracker.update)
-                    tracker.next_step()
-                    
-                    # Get audio duration for cost calculation
-                    audio_info = sf.info(temp_audio)
-                    duration_seconds = audio_info.duration
-                    
-                    # Calculate and print costs to terminal
-                    print("\n=== Cost Analysis ===")
-                    self.cost_calculator.add_transcription_cost(duration_seconds)
-                    
-                    # Step 2: Extract features
-                    tracker.update(0, "Extracting audio features...")
-                    audio_features = self.feature_extractor.extract_features(
-                        temp_audio,
-                        lambda p, m: tracker.update(p, "Extracting audio features", m)
-                    )
-                    tracker.next_step()
-                    
-                    # Step 3: Transcribe
-                    tracker.update(0, "Transcribing audio...")
-                    transcript = self._transcribe_audio(
-                        temp_audio,
-                        lambda p, m: tracker.update(p, "Transcribing audio", m)
-                    )
-                    tracker.next_step()
-                    
-                    # Step 4: Analyze content
-                    tracker.update(0, "Analyzing teaching content...")
-                    content_prompt = self.content_analyzer._create_analysis_prompt(transcript)
-                    content_analysis = self.content_analyzer.analyze_content(
-                        transcript,
-                        lambda p, m: tracker.update(p, "Analyzing teaching content", m)
-                    )
-                    self.cost_calculator.add_gpt4_cost(
-                        content_prompt,
-                        json.dumps(content_analysis),
-                        'content_analysis'
-                    )
-                    tracker.next_step()
-                    
-                    # Step 5: Generate recommendations
-                    tracker.update(0, "Generating recommendations...")
-                    speech_metrics = self._evaluate_speech_metrics(
-                        transcript,
-                        audio_features,
-                        lambda p, m: tracker.update(p, "Evaluating speech metrics", m)
-                    )
-                    
-                    rec_prompt = self.recommendation_generator._create_recommendation_prompt(
-                        speech_metrics,
-                        content_analysis
-                    )
-                    recommendations = self.recommendation_generator.generate_recommendations(
-                        speech_metrics,
-                        content_analysis,
-                        lambda p, m: tracker.update(p, "Generating recommendations", m)
-                    )
-                    self.cost_calculator.add_gpt4_cost(
-                        rec_prompt,
-                        json.dumps(recommendations),
-                        'recommendations'
-                    )
-                    tracker.next_step()
-                    
-                    # Print final cost breakdown
-                    self.cost_calculator.print_total_cost()
-                    
-                    return {
-                        "communication": speech_metrics,
-                        "teaching": content_analysis,
-                        "recommendations": recommendations,
-                        "transcript": transcript
-                    }
+    def evaluate_video(self, video_path: str, transcript_file: Optional[str] = None) -> Dict[str, Any]:
+        """Evaluate video with preprocessing for faster transcription"""
+        temp_audio = None
+        processed_audio = None
+        
+        try:
+            # Create progress containers
+            progress_container = st.empty()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            except Exception as e:
-                logger.error(f"Error in video evaluation: {e}")
-                raise
+            def update_progress(progress: float, status: str, detail: str = None):
+                """Update progress UI elements"""
+                progress_container.markdown(f"### {status}")
+                if detail:
+                    status_text.text(detail)
+                progress_bar.progress(progress)
+
+            # Step 1: Extract audio (10% of progress)
+            update_progress(0.1, "Step 1/5: Extracting audio...")
+            # Create temporary files with .wav extension
+            temp_audio = tempfile.mktemp(suffix=".wav")
+            self._extract_audio(video_path, temp_audio)
+            
+            # Step 2: Preprocess audio (20% of progress)
+            update_progress(0.2, "Step 2/5: Preprocessing audio...")
+            processed_audio = self._preprocess_audio(temp_audio)
+            
+            # Step 3: Get transcript (40% of progress)
+            update_progress(0.4, "Step 3/5: Processing transcript...")
+            if transcript_file:
+                # Read provided transcript
+                transcript = transcript_file.getvalue().decode('utf-8')
+                logger.info("Using provided transcript")
+            else:
+                # Transcribe audio if no transcript provided
+                transcript = self._transcribe_audio(processed_audio, 
+                                             lambda p, s, d=None: update_progress(0.4 + p * 0.2, s, d))
+                # Calculate transcription cost
+                audio_duration = librosa.get_duration(path=processed_audio)
+                self.cost_calculator.add_transcription_cost(audio_duration)
+            
+            # Step 4: Extract features (60% of progress)
+            update_progress(0.6, "Step 4/5: Extracting audio features...")
+            audio_features = self.feature_extractor.extract_features(processed_audio)
+            
+            # Step 5: Analyze content and generate recommendations (100% of progress)
+            update_progress(0.8, "Step 5/5: Analyzing content...")
+            
+            # Evaluate speech metrics
+            speech_metrics = self._evaluate_speech_metrics(transcript, audio_features)
+            
+            # Calculate content analysis cost
+            content_analysis = self.content_analyzer.analyze_content(
+                transcript, 
+                lambda p, s: update_progress(0.8 + p * 0.1, s)
+            )
+            self.cost_calculator.add_gpt4_cost(transcript, str(content_analysis), 'content_analysis')
+            
+            # Calculate recommendations cost
+            recommendations = self.recommendation_generator.generate_recommendations(
+                speech_metrics,
+                content_analysis,
+                lambda p, s: update_progress(0.9 + p * 0.1, s)
+            )
+            self.cost_calculator.add_gpt4_cost(
+                str(speech_metrics) + str(content_analysis),
+                str(recommendations),
+                'recommendations'
+            )
+            
+            # Print total cost breakdown
+            self.cost_calculator.print_total_cost()
+            
+            # Complete progress
+            update_progress(1.0, "Processing complete!")
+            
+            return {
+                "communication": speech_metrics,
+                "teaching": content_analysis,
+                "recommendations": recommendations,
+                "transcript": transcript
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in video evaluation: {e}")
+            raise
+            
+        finally:
+            # Clean up temporary files
+            for temp_file in [temp_audio, processed_audio]:
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                        logger.info(f"Cleaned up temporary file: {temp_file}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove temporary file {temp_file}: {e}")
 
     def _extract_audio(self, video_path: str, output_path: str, progress_callback=None) -> str:
         """Extract audio from video"""
@@ -955,13 +968,13 @@ class MentorEvaluator:
 
             # Initialize model with optimized settings
             model = WhisperModel(
-                "small",
+                "small",  # Use smaller model for faster processing
                 device=device,
                 compute_type=compute_type,
                 download_root=self.model_cache_dir,
                 local_files_only=False,
-                cpu_threads=4,
-                num_workers=2
+                cpu_threads=4,  # Increase CPU threads for parallel processing
+                num_workers=2   # Add workers for data loading
             )
 
             if progress_callback:
@@ -974,11 +987,11 @@ class MentorEvaluator:
             # First pass to count total segments
             segments_preview, _ = model.transcribe(
                 audio_path,
-                beam_size=5,
+                beam_size=5,  # Reduced beam size for faster processing
                 word_timestamps=True,
                 vad_filter=True,
                 vad_parameters=dict(
-                    min_silence_duration_ms=500,
+                    min_silence_duration_ms=500,  # Increased silence threshold
                     speech_pad_ms=100
                 )
             )
@@ -1039,7 +1052,7 @@ class MentorEvaluator:
             # Start timing for ETA calculation
             start_time = time.time()
 
-            # Transcribe with progress updates
+            # Transcribe with optimized settings for faster-whisper
             segments, _ = model.transcribe(
                 audio_path,
                 beam_size=5,
@@ -1160,12 +1173,14 @@ class MentorEvaluator:
                 },
                 "intonation": {
                     "pitch": float(audio_features.get("pitch_mean", 0)),
-                    "pitchScore": 1 if 20 <= float(audio_features.get("pitch_std", 0)) / float(audio_features.get("pitch_mean", 1)) * 100 <= 40 else 0,  # Updated pitch variation range
+                    "pitchScore": 1 if 20 <= float(audio_features.get("pitch_std", 0)) / float(audio_features.get("pitch_mean", 1)) * 100 <= 40 else 0,
                     "pitchVariation": float(audio_features.get("pitch_std", 0)),
-                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 8 else 0,  # Updated minimum variations
+                    # Update variations threshold from 8 to 100
+                    "patternScore": 1 if float(audio_features.get("variations_per_minute", 0)) >= 100 else 0,  # Updated from >= 8
                     "risingPatterns": int(audio_features.get("rising_patterns", 0)),
                     "fallingPatterns": int(audio_features.get("falling_patterns", 0)),
-                    "variationsPerMin": float(audio_features.get("variations_per_minute", 0))
+                    "variationsPerMin": float(audio_features.get("variations_per_minute", 0)),
+                    "mu": float(audio_features.get("pitch_mean", 0))
                 },
                 "energy": {
                     "score": 1 if 60 <= mean_amplitude <= 75 else 0,  # Updated amplitude range for teaching
@@ -1178,6 +1193,46 @@ class MentorEvaluator:
         except Exception as e:
             logger.error(f"Error in speech metrics evaluation: {e}")
             raise
+
+    def _preprocess_audio(self, audio_path: str) -> str:
+        """Preprocess audio for faster transcription"""
+        try:
+            output_path = audio_path.rsplit('.', 1)[0] + '_processed.wav'
+            
+            # Modified FFmpeg command with more lenient silence removal parameters
+            ffmpeg_cmd = [
+                'ffmpeg',
+                '-i', audio_path,
+                '-ar', '16000',  # Sample rate
+                '-ac', '1',      # Mono audio
+                '-af', 'silenceremove=stop_periods=-1:stop_duration=2:stop_threshold=-30dB',  # Adjusted parameters
+                '-acodec', 'pcm_s16le',
+                '-y',            # Overwrite output file
+                '-loglevel', 'error',  # Only show errors in output
+                output_path
+            ]
+            
+            # Run FFmpeg with error handling
+            try:
+                result = subprocess.run(
+                    ffmpeg_cmd,
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                return output_path
+                
+            except subprocess.CalledProcessError as e:
+                logger.error(f"FFmpeg error: {e.stderr}")
+                logger.warning("Falling back to original audio file without preprocessing")
+                # If preprocessing fails, copy the original file
+                shutil.copy2(audio_path, output_path)
+                return output_path
+                
+        except Exception as e:
+            logger.error(f"Error preprocessing audio: {e}")
+            logger.warning("Using original audio file")
+            return audio_path
 
 def validate_video_file(file_path: str):
     """Validate video file before processing"""
@@ -1206,8 +1261,9 @@ def validate_video_file(file_path: str):
 def display_evaluation(evaluation: Dict[str, Any]):
     """Display evaluation results with improved metrics visualization"""
     try:
+        # Keep existing tabs setup and Communication tab
         tabs = st.tabs(["Communication", "Teaching", "Recommendations", "Transcript"])
-
+        
         with tabs[0]:
             st.header("Communication Metrics")
             
@@ -1224,7 +1280,24 @@ def display_evaluation(evaluation: Dict[str, Any]):
                     st.metric("Score", "✅ Pass" if score == 1 else "❌ Needs Improvement")
                     st.metric("Words per Minute", f"{wpm:.1f}")
                 with col2:
-                    st.info("**Acceptable Range:** 120-180 WPM")
+                    st.info("""
+                    **Acceptable Range:** 120-180 WPM
+                    """)
+                    
+                    # Add explanation card
+                    st.markdown("""
+                    <div class="metric-explanation-card">
+                        <h4>🎯 Understanding Speed Metrics</h4>
+                        <ul>
+                            <li><b>Words per Minute (WPM):</b> Rate of speech delivery
+                                <br>• Too slow (<120 WPM): May lose audience engagement
+                                <br>• Too fast (>180 WPM): May hinder comprehension
+                                <br>• Optimal (130-160 WPM): Best for learning</li>
+                            <li><b>Total Words:</b> Complete word count in the presentation</li>
+                            <li><b>Duration:</b> Total speaking time in minutes</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             # Fluency Metrics
             with st.expander("🗣️ Fluency", expanded=True):
@@ -1244,6 +1317,20 @@ def display_evaluation(evaluation: Dict[str, Any]):
                     - Fillers: <=3 FPM
                     - Errors: <=2 EPM
                     """)
+                    
+                    st.markdown("""
+                    <div class="metric-explanation-card">
+                        <h4>🎭 Understanding Fluency Metrics</h4>
+                        <ul>
+                            <li><b>Fillers per Minute:</b> Frequency of filler words
+                                <br>• Common fillers: um, uh, like, you know
+                                <br>• High usage can indicate uncertainty</li>
+                            <li><b>Errors per Minute:</b> Speaking mistakes
+                                <br>• Includes: repeated words, incomplete sentences
+                                <br>• Reflects speech preparation and confidence</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             # Flow Metrics
             with st.expander("🌊 Flow", expanded=True):
@@ -1257,6 +1344,21 @@ def display_evaluation(evaluation: Dict[str, Any]):
                     st.metric("Pauses per Minute", f"{ppm:.1f}")
                 with col2:
                     st.info("**Acceptable Range:** < 12 PPM")
+                    
+                    st.markdown("""
+                    <div class="metric-explanation-card">
+                        <h4>🌊 Understanding Flow Metrics</h4>
+                        <ul>
+                            <li><b>Pauses per Minute (PPM):</b> Frequency of speech breaks
+                                <br>• Strategic pauses (8-12 PPM): Aid comprehension
+                                <br>• Too few: May sound rushed
+                                <br>• Too many: Can disrupt flow</li>
+                            <li><b>Pause Duration:</b> Length of speech breaks
+                                <br>• Short pauses (0.5-1s): Natural rhythm
+                                <br>• Long pauses (>2s): Should be intentional</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
             
             # Intonation Metrics
             with st.expander("🎵 Intonation", expanded=True):
@@ -1268,12 +1370,13 @@ def display_evaluation(evaluation: Dict[str, Any]):
                 rising = intonation.get("risingPatterns", 0)
                 falling = intonation.get("fallingPatterns", 0)
                 variations = intonation.get("variationsPerMin", 0)
+                mu = intonation.get("mu", 0)
                 
                 col1, col2 = st.columns(2)
                 with col1:
                     st.metric("Pitch Score", "✅ Pass" if pitch_score == 1 else "❌ Needs Improvement")
                     st.metric("Pattern Score", "✅ Pass" if pattern_score == 1 else "❌ Needs Improvement")
-                    st.metric("Frequency / Pitch", f"{pitch:.1f} Hz")
+                    st.metric("Pitch Mean (μ)", f"{mu:.1f} Hz")
                     st.metric("Pitch Variation (σ)", f"{pitch_variation:.1f} Hz")
                     st.metric("Rising Patterns", rising)
                     st.metric("Falling Patterns", falling)
@@ -1282,9 +1385,25 @@ def display_evaluation(evaluation: Dict[str, Any]):
                     st.info("""
                     **Acceptable Ranges:**
                     - Pitch Variation: 20-40% from baseline
-                    - Variations per Minute: >8
+                    - Variations per Minute: >100
                     """)
-            
+                    
+                    # Add new explanation card
+                    st.markdown("""
+                    <div class="metric-explanation-card">
+                        <h4>📊 Understanding Intonation Metrics</h4>
+                        <ul>
+                            <li><b>Pitch Mean (μ):</b> Average voice frequency. Typical ranges:
+                                <br>• Male: 85-180 Hz
+                                <br>• Female: 165-255 Hz</li>
+                            <li><b>Pitch Variation (σ):</b> How much your pitch changes. Higher values indicate more dynamic speech.</li>
+                            <li><b>Rising Patterns:</b> Number of upward pitch changes, often used for questions or emphasis.</li>
+                            <li><b>Falling Patterns:</b> Number of downward pitch changes, typically used for statements or conclusions.</li>
+                            <li><b>Variations per Minute:</b> Total pitch changes per minute. Higher values indicate more engaging speech patterns.</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
+
             # Energy Metrics
             with st.expander("⚡ Energy", expanded=True):
                 energy = metrics.get("energy", {})
@@ -1300,311 +1419,261 @@ def display_evaluation(evaluation: Dict[str, Any]):
                 with col2:
                     st.info("""
                     **Acceptable Ranges:**
-                    - Mean Amplitude: 60-75 dB
-                    - Amplitude Deviation: 0.05-0.15
+                    - Mean Amplitude: 65-85 dB
+                    - Amplitude Deviation: 0.15-0.35
                     """)
+                    
+                    st.markdown("""
+                    <div class="metric-explanation-card">
+                        <h4>⚡ Understanding Energy Metrics</h4>
+                        <ul>
+                            <li><b>Mean Amplitude:</b> Average voice volume
+                                <br>• Below 65 dB: Too quiet for classroom
+                                <br>• 65-85 dB: Optimal teaching range
+                                <br>• Above 85 dB: May cause listener fatigue</li>
+                            <li><b>Amplitude Deviation:</b> Voice volume variation
+                                <br>• Below 0.15: Too monotone
+                                <br>• 0.15-0.35: Natural variation
+                                <br>• Above 0.35: Excessive variation</li>
+                            <li><b>Variation Score:</b> Overall energy dynamics
+                                <br>• Measures consistency of voice projection
+                                <br>• Reflects engagement and emphasis</li>
+                        </ul>
+                    </div>
+                    """, unsafe_allow_html=True)
 
         with tabs[1]:
             st.header("Teaching Analysis")
             
-            # Get teaching data
             teaching_data = evaluation.get("teaching", {})
             
-            # Concept Assessment Section
-            st.subheader("Concept Assessment")
-            
-            concept_assessment = teaching_data.get("Concept Assessment", {})
-            
-            # Define concept categories with descriptions
-            concept_categories = [
-                ("Subject Matter Accuracy", "Is the mentor making any factual errors when teaching / making any wrong assumptions or wrong conclusions / correlations - is he talking in the air"),
-                ("First Principles Approach", "You talk about the WHY first and build an understanding / intuition of the topic before you introduce technical jargons / terminologies"),
-                ("Examples and Business Context", "In relevant areas, you support your teaching with business examples and context"),
-                ("Cohesive Storytelling", "Is the mentor linking between topics or jumping around"),
-                ("Engagement and Interaction", "Is the mentor speaking to himself or is he asking learners thought provoking questions to inspire understanding"),
-                ("Professional Tone", "Is the mentor speaking in a casual or professional tone / is he using words that are unprofessional")
-            ]
-            
-            # Display each concept category
-            for category, description in concept_categories:
-                with st.expander(f"{category} - Score: {'Pass' if concept_assessment.get(category, {}).get('Score', 0) == 1 else 'Needs Improvement'}", expanded=True):
-                    st.caption(description)
+            # Display Concept Assessment with improved styling
+            with st.expander("📚 Concept Assessment", expanded=True):
+                concept_data = teaching_data.get("Concept Assessment", {})
+                
+                # Create columns for better organization
+                for category, details in concept_data.items():
+                    score = details.get("Score", 0)
+                    citations = details.get("Citations", [])
                     
-                    assessment = concept_assessment.get(category, {"Score": 0, "Citations": []})
-                    score = assessment.get("Score", 0)
-                    citations = assessment.get("Citations", [])
+                    # Create a styled card for each category
+                    st.markdown(f"""
+                        <div class="teaching-card">
+                            <div class="teaching-header">
+                                <span class="category-name">{category}</span>
+                                <span class="score-badge {'score-pass' if score == 1 else 'score-fail'}">
+                                    {'✅ Pass' if score == 1 else '❌ Needs Work'}
+                                </span>
+                            </div>
+                            <div class="citations-container">
+                    """, unsafe_allow_html=True)
                     
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
-                        # Display score with color and icon
-                        score_color = "green" if score == 1 else "red"
-                        score_icon = "✅" if score == 1 else "❌"
-                        st.markdown(f"**Score:** :{score_color}[{score_icon} {'Pass' if score == 1 else 'Needs Improvement'}]")
+                    # Display citations with improved formatting
+                    for citation in citations:
+                        st.markdown(f"""
+                            <div class="citation-box">
+                                <i class="citation-text">{citation}</i>
+                            </div>
+                        """, unsafe_allow_html=True)
                     
-                    with col2:
-                        # Display citations in a formatted box
-                        if citations:
-                            st.markdown("**Key Observations:**")
-                            for citation in citations:
-                                st.markdown(f"""
-                                <div class="citation-box">
-                                    🔍 {citation}
-                                </div>
-                                """, unsafe_allow_html=True)
-                        else:
-                            st.info("No observations available")
+                    st.markdown("</div></div>", unsafe_allow_html=True)
+                    st.markdown("---")
             
-            # Code Assessment Section
-            st.subheader("Code Assessment")
-            
-            code_assessment = teaching_data.get("Code Assessment", {})
-            
-            # Define code categories with descriptions
-            code_categories = [
-                ("Depth of Explanation", "Is code just being read out or is the mentor talking about syntaxes, usage of libraries and why, functions, parameters and method (and what they do)"),
-                ("Output Interpretation", "Are the outputs of the code being interpreted in the light of a business context and outcome"),
-                ("Breaking down Complexity", "Is the mentor able to break down a code into simpler sections of code blocks / modules and explain their purpose and logical flow")
-            ]
-            
-            # Display each code category
-            for category, description in code_categories:
-                with st.expander(f"{category} - Score: {'Pass' if code_assessment.get(category, {}).get('Score', 0) == 1 else 'Needs Improvement'}", expanded=True):
-                    st.caption(description)
+            # Display Code Assessment with similar styling
+            with st.expander("💻 Code Assessment", expanded=True):
+                code_data = teaching_data.get("Code Assessment", {})
+                
+                for category, details in code_data.items():
+                    score = details.get("Score", 0)
+                    citations = details.get("Citations", [])
                     
-                    assessment = code_assessment.get(category, {"Score": 0, "Citations": []})
-                    score = assessment.get("Score", 0)
-                    citations = assessment.get("Citations", [])
+                    st.markdown(f"""
+                        <div class="teaching-card">
+                            <div class="teaching-header">
+                                <span class="category-name">{category}</span>
+                                <span class="score-badge {'score-pass' if score == 1 else 'score-fail'}">
+                                    {'✅ Pass' if score == 1 else '❌ Needs Work'}
+                                </span>
+                            </div>
+                            <div class="citations-container">
+                    """, unsafe_allow_html=True)
                     
-                    col1, col2 = st.columns([1, 2])
-                    with col1:
-                        score_color = "green" if score == 1 else "red"
-                        score_icon = "✅" if score == 1 else "❌"
-                        st.markdown(f"**Score:** :{score_color}[{score_icon} {'Pass' if score == 1 else 'Needs Improvement'}]")
+                    for citation in citations:
+                        st.markdown(f"""
+                            <div class="citation-box">
+                                <i class="citation-text">{citation}</i>
+                            </div>
+                        """, unsafe_allow_html=True)
                     
-                    with col2:
-                        if citations:
-                            st.markdown("**Key Observations:**")
-                            for citation in citations:
-                                st.markdown(f"""
-                                <div class="citation-box">
-                                    💻 {citation}
-                                </div>
-                                """, unsafe_allow_html=True)
-                        else:
-                            st.info("No observations available")
-            
-            # Teaching Summary Section with metrics
-            st.subheader("Teaching Summary")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                concept_scores = [assessment.get("Score", 0) for category in concept_assessment.values() for assessment in [category]]
-                concept_score = (sum(concept_scores) / len(concept_scores) * 100) if concept_scores else 0
-                st.metric("Concept Score", f"{concept_score:.1f}%", 
-                         delta="Pass" if concept_score >= 70 else "Needs Improvement",
-                         delta_color="normal" if concept_score >= 70 else "inverse")
-            
-            with col2:
-                code_scores = [assessment.get("Score", 0) for category in code_assessment.values() for assessment in [category]]
-                code_score = (sum(code_scores) / len(code_scores) * 100) if code_scores else 0
-                st.metric("Code Score", f"{code_score:.1f}%",
-                         delta="Pass" if code_score >= 70 else "Needs Improvement",
-                         delta_color="normal" if code_score >= 70 else "inverse")
-            
-            with col3:
-                total_scores = concept_scores + code_scores
-                overall_score = (sum(total_scores) / len(total_scores) * 100) if total_scores else 0
-                st.metric("Overall Teaching Score", f"{overall_score:.1f}%",
-                         delta="Pass" if overall_score >= 70 else "Needs Improvement",
-                         delta_color="normal" if overall_score >= 70 else "inverse")
+                    st.markdown("</div></div>", unsafe_allow_html=True)
+                    st.markdown("---")
 
         with tabs[2]:
             st.header("Recommendations")
-            
             recommendations = evaluation.get("recommendations", {})
             
-            # Calculate Overall Score
-            communication_metrics = evaluation.get("communication", {})
-            teaching_data = evaluation.get("teaching", {})
-            
-            # Calculate Communication Score
-            comm_scores = []
-            for category in ["speed", "fluency", "flow", "intonation", "energy"]:
-                if category in communication_metrics:
-                    if "score" in communication_metrics[category]:
-                        comm_scores.append(communication_metrics[category]["score"])
-            
-            communication_score = (sum(comm_scores) / len(comm_scores) * 100) if comm_scores else 0
-            
-            # Calculate Teaching Score (combining concept and code assessment)
-            concept_assessment = teaching_data.get("Concept Assessment", {})
-            code_assessment = teaching_data.get("Code Assessment", {})
-            
-            teaching_scores = []
-            # Add concept scores
-            for category in concept_assessment.values():
-                if isinstance(category, dict) and "Score" in category:
-                    teaching_scores.append(category["Score"])
-            
-            # Add code scores
-            for category in code_assessment.values():
-                if isinstance(category, dict) and "Score" in category:
-                    teaching_scores.append(category["Score"])
-            
-            teaching_score = (sum(teaching_scores) / len(teaching_scores) * 100) if teaching_scores else 0
-            
-            # Calculate Overall Score (50-50 weight between communication and teaching)
-            overall_score = (communication_score + teaching_score) / 2
-            
-            # Display Overall Scores at the top of recommendations
-            st.markdown("### 📊 Overall Performance")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric(
-                    "Communication Score",
-                    f"{communication_score:.1f}%",
-                    delta="Pass" if communication_score >= 70 else "Needs Improvement",
-                    delta_color="normal" if communication_score >= 70 else "inverse"
-                )
-            
-            with col2:
-                st.metric(
-                    "Teaching Score",
-                    f"{teaching_score:.1f}%",
-                    delta="Pass" if teaching_score >= 70 else "Needs Improvement",
-                    delta_color="normal" if teaching_score >= 70 else "inverse"
-                )
-            
-            with col3:
-                st.metric(
-                    "Overall Score",
-                    f"{overall_score:.1f}%",
-                    delta="Pass" if overall_score >= 70 else "Needs Improvement",
-                    delta_color="normal" if overall_score >= 70 else "inverse"
-                )
-            
-            # Continue with existing recommendations display
-            with st.expander("💡 Areas for Improvement", expanded=True):
-                improvements = recommendations.get("improvements", [])
-                if isinstance(improvements, list):
-                    for i, improvement in enumerate(improvements, 1):
-                        if isinstance(improvement, str):
-                            category = "General"
-                            icon = "🎯"
-                            if any(keyword in improvement.lower() for keyword in ["voice", "volume", "pitch", "pace"]):
-                                category = "Voice and Delivery"
-                                icon = "🗣️"
-                            elif any(keyword in improvement.lower() for keyword in ["explain", "concept", "understanding"]):
-                                category = "Teaching Approach"
-                                icon = "📚"
-                            elif any(keyword in improvement.lower() for keyword in ["engage", "interact", "question"]):
-                                category = "Engagement"
-                                icon = "🤝"
-                            elif any(keyword in improvement.lower() for keyword in ["code", "technical", "implementation"]):
-                                category = "Technical Content"
-                                icon = "💻"
-                            
-                            st.markdown(f"""
-                            <div class="recommendation-card">
-                                <h4>{icon} {i}. {category}</h4>
-                                <p>{improvement}</p>
-                            </div>
-                            """, unsafe_allow_html=True)
-            
-            # Profile Matching with enhanced formatting
-            with st.expander("👥 Profile Matching", expanded=True):
+            # Display summary in a styled card
+            if "summary" in recommendations:
                 st.markdown("""
-                    <div class="profile-guide">
-                        <h4>🎯 Profile Matching Guide</h4>
-                        <p>Analyzing mentor's teaching style compatibility with different learner profiles</p>
-                    </div>
+                    <div class="summary-card">
+                        <h4>📊 Overall Summary</h4>
+                        <div class="summary-content">
                 """, unsafe_allow_html=True)
-                
-                profiles = {
-                    "junior_technical": {
-                        "title": "Junior Technical",
-                        "description": "Low Programming Ex + Low Work Ex",
-                        "icon": "👨‍💻",
-                        "characteristics": [
-                            "Young professionals starting their technical career",
-                            "Need engaging, fast-paced content",
-                            "Prefer hands-on examples"
-                        ]
-                    },
-                    "senior_non_technical": {
-                        "title": "Senior Non-Technical",
-                        "description": "Low Programming Ex + High Work Ex",
-                        "icon": "👨‍💼",
-                        "characteristics": [
-                            "Experienced professionals transitioning to technical roles",
-                            "Need slower pace with detailed explanations",
-                            "Appreciate business context"
-                        ]
-                    },
-                    "junior_expert": {
-                        "title": "Junior Expert",
-                        "description": "High Programming Ex + Low Work Ex",
-                        "icon": "🚀",
-                        "characteristics": [
-                            "Technical experts early in their career",
-                            "Prefer fast-paced, advanced content",
-                            "Focus on technical depth"
-                        ]
-                    },
-                    "senior_expert": {
-                        "title": "Senior Expert",
-                        "description": "High Programming Ex + High Work Ex",
-                        "icon": "🎯",
-                        "characteristics": [
-                            "Seasoned technical professionals",
-                            "Expect advanced concepts with business context",
-                            "Value efficient, precise delivery"
-                        ]
-                    }
+                st.markdown(recommendations["summary"])
+                st.markdown("</div></div>", unsafe_allow_html=True)
+            
+            # Display improvements with categorization
+            st.markdown("<h4>💡 Areas for Improvement</h4>", unsafe_allow_html=True)
+            improvements = recommendations.get("improvements", [])
+            
+            if isinstance(improvements, list):
+                # Categorize improvements
+                categories = {
+                    "🗣️ Communication": [],
+                    "📚 Teaching": [],
+                    "💻 Technical": []
                 }
                 
-                profile_matches = recommendations.get("profileMatches", [])
+                for improvement in improvements:
+                    if any(keyword in improvement.lower() for keyword in ["pace", "speed", "tone", "volume", "pause", "filler"]):
+                        categories["🗣️ Communication"].append(improvement)
+                    elif any(keyword in improvement.lower() for keyword in ["explain", "concept", "example", "structure", "engagement"]):
+                        categories["📚 Teaching"].append(improvement)
+                    else:
+                        categories["💻 Technical"].append(improvement)
                 
-                # Find the recommended profile
-                recommended_profile = next(
-                    (match["profile"] for match in profile_matches if match.get("match", False)),
-                    None
-                )
+                # Display categorized improvements in columns
+                cols = st.columns(len(categories))
+                for col, (category, items) in zip(cols, categories.items()):
+                    with col:
+                        st.markdown(f"""
+                            <div class="improvement-card">
+                                <h5>{category}</h5>
+                                <div class="improvement-list">
+                        """, unsafe_allow_html=True)
+                        
+                        for item in items:
+                            st.markdown(f"""
+                                <div class="improvement-item">
+                                    • {item}
+                                </div>
+                            """, unsafe_allow_html=True)
+                        
+                        st.markdown("</div></div>", unsafe_allow_html=True)
+            
+            # Add additional CSS for new components
+            st.markdown("""
+                <style>
+                .teaching-card {
+                    background: white;
+                    border-radius: 8px;
+                    padding: 20px;
+                    margin: 10px 0;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
                 
-                for profile_key, profile_data in profiles.items():
-                    match_info = next(
-                        (match for match in profile_matches if match["profile"] == profile_key),
-                        None
-                    )
-                    # Only mark as recommended if it matches the single recommended profile
-                    is_recommended = profile_key == recommended_profile
-                    
-                    st.markdown(f"""
-                    <div class="profile-card {'recommended' if is_recommended else ''}">
-                        <div class="profile-header">
-                            <h5>{profile_data['icon']} {profile_data['title']}</h5>
-                            <span class="profile-badge {profile_key}">
-                                {profile_data['description']}
-                            </span>
-                        </div>
-                        <div class="profile-content">
-                            <p><strong>Characteristics:</strong></p>
-                            <ul>
-                                {''.join(f'<li>{char}</li>' for char in profile_data['characteristics'])}
-                            </ul>
-                            <div class="recommendation-status {'recommended' if is_recommended else ''}">
-                                {('✅ Recommended' if is_recommended else '⚠️ Not Optimal')}<br>
-                                <small>{match_info['reason'] if match_info else 'Profile not matched based on teaching style'}</small>
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
+                .teaching-header {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                    margin-bottom: 15px;
+                }
+                
+                .category-name {
+                    font-size: 1.2em;
+                    font-weight: bold;
+                    color: #1f77b4;
+                }
+                
+                .score-badge {
+                    padding: 5px 15px;
+                    border-radius: 15px;
+                    font-weight: bold;
+                }
+                
+                .score-pass {
+                    background-color: #28a745;
+                    color: white;
+                }
+                
+                .score-fail {
+                    background-color: #dc3545;
+                    color: white;
+                }
+                
+                .citations-container {
+                    margin-top: 10px;
+                }
+                
+                .citation-box {
+                    background: #f8f9fa;
+                    border-left: 3px solid #6c757d;
+                    padding: 10px;
+                    margin: 5px 0;
+                    border-radius: 0 4px 4px 0;
+                }
+                
+                .citation-text {
+                    color: #495057;
+                }
+                
+                .summary-card {
+                    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+                    border-radius: 8px;
+                    padding: 20px;
+                    margin: 15px 0;
+                    border-left: 4px solid #1f77b4;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
+                
+                .improvement-card {
+                    background: white;
+                    border-radius: 8px;
+                    padding: 15px;
+                    margin: 10px 0;
+                    height: 100%;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                }
+                
+                .improvement-card h5 {
+                    color: #1f77b4;
+                    margin-bottom: 10px;
+                    border-bottom: 2px solid #f0f0f0;
+                    padding-bottom: 5px;
+                }
+                
+                .improvement-list {
+                    margin-top: 10px;
+                }
+                
+                .improvement-item {
+                    padding: 5px 0;
+                    border-bottom: 1px solid #f0f0f0;
+                }
+                
+                .improvement-item:last-child {
+                    border-bottom: none;
+                }
+                </style>
+            """, unsafe_allow_html=True)
 
-        # Transcript tab with error handling
         with tabs[3]:
-            st.header("Transcript")
-            st.text(evaluation.get("transcript", "Transcript not available"))
+            st.header("Transcript with Timestamps")
+            transcript = evaluation.get("transcript", "")
+            
+            # Split transcript into sentences and add timestamps
+            sentences = re.split(r'(?<=[.!?])\s+', transcript)
+            for i, sentence in enumerate(sentences):
+                # Calculate approximate timestamp based on words and average speaking rate
+                words_before = len(' '.join(sentences[:i]).split())
+                timestamp = words_before / 150  # Assuming 150 words per minute
+                minutes = int(timestamp)
+                seconds = int((timestamp - minutes) * 60)
+                
+                st.markdown(f"**[{minutes:02d}:{seconds:02d}]** {sentence}")
+
+            # Comment out original transcript display
+            # st.text(evaluation.get("transcript", "Transcript not available"))
 
     except Exception as e:
         logger.error(f"Error displaying evaluation: {e}")
@@ -1854,6 +1923,36 @@ def display_evaluation(evaluation: Dict[str, Any]):
         .metric-box b {
             color: #1f77b4;
         }
+        
+        <style>
+        .metric-explanation-card {
+            background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+            padding: 15px;
+            border-radius: 8px;
+            margin-top: 15px;
+            border-left: 4px solid #17a2b8;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+        
+        .metric-explanation-card h4 {
+            color: #17a2b8;
+            margin-bottom: 10px;
+        }
+        
+        .metric-explanation-card ul {
+            list-style-type: none;
+            padding-left: 0;
+        }
+        
+        .metric-explanation-card li {
+            margin-bottom: 12px;
+            padding-left: 15px;
+            border-left: 2px solid #e9ecef;
+        }
+        
+        .metric-explanation-card li:hover {
+            border-left: 2px solid #17a2b8;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -1951,6 +2050,11 @@ def generate_pdf_report(evaluation_data: Dict[str, Any]) -> bytes:
         # Recommendations Section
         story.append(Paragraph("Recommendations", styles['Heading2']))
         recommendations = evaluation_data.get("recommendations", {})
+        
+        if "summary" in recommendations:
+            story.append(Paragraph("Overall Summary:", styles['Heading3']))
+            story.append(Paragraph(recommendations["summary"], styles['Normal']))
+            story.append(Spacer(1, 20))
         
         if "improvements" in recommendations:
             story.append(Paragraph("Areas for Improvement:", styles['Heading3']))
@@ -2073,6 +2177,40 @@ def main():
                 .score-fail {
                     background-color: #dc3545;
                     color: white;
+                }
+                
+                .metric-box {
+                    background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%);
+                    padding: 10px;
+                    border-radius: 8px;
+                    margin: 5px;
+                    border-left: 4px solid #1f77b4;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                    transition: transform 0.2s ease;
+                }
+                
+                .metric-box:hover {
+                    transform: translateX(5px);
+                }
+                
+                .metric-box.batch {
+                    border-left-color: #28a745;
+                }
+                
+                .metric-box.time {
+                    border-left-color: #dc3545;
+                }
+                
+                .metric-box.progress {
+                    border-left-color: #ffc107;
+                }
+                
+                .metric-box.segment {
+                    border-left-color: #17a2b8;
+                }
+                
+                .metric-box b {
+                    color: #1f77b4;
                 }
             </style>
             
@@ -2241,47 +2379,27 @@ def main():
                     st.error("File size exceeds 2GB limit. Please upload a smaller file.")
                     return
                 
-                # Store evaluation results in session state
+                # Process video with progress tracking
                 if 'evaluation_results' not in st.session_state:
-                    # Update sidebar status
                     status_placeholder.info("Processing video and generating analysis...")
                     
-                    # Process video only if results aren't already in session state
-                    with st.spinner("Processing video"):
-                        evaluator = MentorEvaluator()
+                    # Create a container for the processing status
+                    process_container = st.container()
+                    with process_container:
+                        st.markdown("""
+                            <div class="processing-status">
+                                <h3>🎥 Processing Video</h3>
+                                <div class="status-details"></div>
+                            </div>
+                        """, unsafe_allow_html=True)
                         
-                        # Temporary: Handle transcript if provided
-                        if uploaded_transcript:
-                            transcript_text = uploaded_transcript.getvalue().decode('utf-8')
-                            # Extract audio features but skip transcription
-                            audio_features = evaluator.feature_extractor.extract_features(video_path)
-                            
-                            # Evaluate speech metrics
-                            speech_metrics = evaluator._evaluate_speech_metrics(
-                                transcript_text,
-                                audio_features
-                            )
-                            
-                            # Analyze content
-                            content_analysis = evaluator.content_analyzer.analyze_content(transcript_text)
-                            
-                            # Generate recommendations
-                            recommendations = evaluator.recommendation_generator.generate_recommendations(
-                                speech_metrics,
-                                content_analysis
-                            )
-                            
-                            # Combine results
-                            st.session_state.evaluation_results = {
-                                "communication": speech_metrics,
-                                "teaching": content_analysis,
-                                "recommendations": recommendations,
-                                "transcript": transcript_text
-                            }
-                        else:
-                            # Original flow: full video evaluation
-                            st.session_state.evaluation_results = evaluator.evaluate_video(video_path)
-                
+                        evaluator = MentorEvaluator()
+                        # Pass the transcript file if provided
+                        st.session_state.evaluation_results = evaluator.evaluate_video(
+                            video_path,
+                            uploaded_transcript if input_type == "Video + Manual Transcript" else None
+                        )
+
                 # Update sidebar status for completion
                 status_placeholder.success("Analysis complete! Review results below.")
                 
