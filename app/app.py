@@ -294,6 +294,11 @@ class ContentAnalyzer:
                              - Provide examples for both good and poor teaching moments
                              - Note specific instances of criteria being met or missed
                              
+                             For each improvement suggestion, categorize it as one of:
+                             - COMMUNICATION: Related to speaking, pace, tone, clarity, delivery
+                             - TEACHING: Related to explanation, examples, engagement, structure
+                             - TECHNICAL: Related to code, implementation, technical concepts
+                             
                              Always respond with valid JSON containing these exact categories."""},
                             {"role": "user", "content": prompt}
                         ],
@@ -549,6 +554,34 @@ Important:
             logger.error(f"Error in speech metrics evaluation: {e}")
             raise
 
+    def generate_suggestions(self, category: str, citations: List[str]) -> List[str]:
+        """Generate contextual suggestions based on category and citations"""
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": """You are a teaching expert providing specific, actionable suggestions 
+                    for improvement. Focus on the single most important, practical advice based on the teaching category 
+                    and cited issues. Keep suggestions under 25 words."""},
+                    {"role": "user", "content": f"""
+                    Teaching Category: {category}
+                    Issues identified in citations:
+                    {json.dumps(citations, indent=2)}
+                    
+                    Please provide 2 or 3 at max specific, actionable suggestion for improvement.
+                    Format as a JSON array with a single string."""}
+                ],
+                response_format={"type": "json_object"},
+                temperature=0.7
+            )
+            
+            result = json.loads(response.choices[0].message.content)
+            return result.get("suggestions", [])
+            
+        except Exception as e:
+            logger.error(f"Error generating suggestions: {e}")
+            return [f"Unable to generate specific suggestions: {str(e)}"]
+
 class RecommendationGenerator:
     """Generates teaching recommendations using OpenAI API"""
     def __init__(self, api_key: str):
@@ -574,7 +607,13 @@ class RecommendationGenerator:
                 response = self.client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": "You are a teaching expert providing actionable recommendations. Always respond with a valid JSON object."},
+                        {"role": "system", "content": """You are a teaching expert providing actionable recommendations. 
+                        Each improvement must be categorized as one of:
+                        - COMMUNICATION: Related to speaking, pace, tone, clarity, delivery
+                        - TEACHING: Related to explanation, examples, engagement, structure
+                        - TECHNICAL: Related to code, implementation, technical concepts
+                        
+                        Always respond with a valid JSON object containing categorized improvements."""},
                         {"role": "user", "content": prompt}
                     ],
                     response_format={"type": "json_object"}
@@ -583,17 +622,35 @@ class RecommendationGenerator:
                 if progress_callback:
                     progress_callback(0.8, "Formatting recommendations...")
                 
-                # Ensure we have valid JSON
                 result_text = response.choices[0].message.content.strip()
                 
                 try:
                     result = json.loads(result_text)
+                    # Ensure improvements are properly formatted
+                    if "improvements" in result:
+                        formatted_improvements = []
+                        for imp in result["improvements"]:
+                            if isinstance(imp, str):
+                                # Default categorization for legacy format
+                                formatted_improvements.append({
+                                    "category": "TECHNICAL",
+                                    "message": imp
+                                })
+                            elif isinstance(imp, dict):
+                                # Ensure proper structure for dict format
+                                formatted_improvements.append({
+                                    "category": imp.get("category", "TECHNICAL"),
+                                    "message": imp.get("message", str(imp))
+                                })
+                        result["improvements"] = formatted_improvements
                 except json.JSONDecodeError:
-                    # Fallback to a default structure if JSON parsing fails
                     result = {
                         "geographyFit": "Unknown",
                         "improvements": [
-                            "Unable to generate specific recommendations"
+                            {
+                                "category": "TECHNICAL",
+                                "message": "Unable to generate specific recommendations"
+                            }
                         ],
                         "rigor": "Undetermined",
                         "profileMatches": []
@@ -607,11 +664,13 @@ class RecommendationGenerator:
             except Exception as e:
                 logger.error(f"Recommendation generation attempt {attempt + 1} failed: {e}")
                 if attempt == self.retry_count - 1:
-                    # Return a default structure on final failure
                     return {
                         "geographyFit": "Unknown",
                         "improvements": [
-                            "Unable to generate specific recommendations"
+                            {
+                                "category": "TECHNICAL",
+                                "message": f"Unable to generate specific recommendations: {str(e)}"
+                            }
                         ],
                         "rigor": "Undetermined",
                         "profileMatches": []
@@ -627,7 +686,7 @@ Content Analysis: {json.dumps(content_analysis)}
 Analyze the teaching style and provide:
 1. A concise performance summary (2-3 paragraphs highlighting key strengths and areas for improvement)
 2. Geography fit assessment
-3. Specific improvements needed
+3. Specific improvements needed (each must be categorized as COMMUNICATION, TEACHING, or TECHNICAL)
 4. Profile matching for different learner types (choose ONLY ONE best match)
 5. Overall teaching rigor assessment
 
@@ -636,7 +695,18 @@ Required JSON structure:
     "summary": "Comprehensive summary of teaching performance, strengths, and areas for improvement",
     "geographyFit": "String describing geographical market fit",
     "improvements": [
-        "Array of specific improvement recommendations"
+        {{
+            "category": "COMMUNICATION",
+            "message": "Specific improvement recommendation"
+        }},
+        {{
+            "category": "TEACHING",
+            "message": "Specific improvement recommendation"
+        }},
+        {{
+            "category": "TECHNICAL",
+            "message": "Specific improvement recommendation"
+        }}
     ],
     "rigor": "Assessment of teaching rigor",
     "profileMatches": [
@@ -949,10 +1019,21 @@ class MentorEvaluator:
             raise AudioProcessingError(f"Audio extraction failed: {str(e)}")
 
     def _transcribe_audio(self, audio_path: str, progress_callback=None) -> str:
-        """Transcribe audio with optimized performance using batching and parallel processing"""
+        """Transcribe audio with detailed progress updates"""
         try:
             if progress_callback:
                 progress_callback(0.1, "Loading transcription model...")
+
+            # Create status columns for metrics
+            status_cols = st.columns(4)
+            with status_cols[0]:
+                batch_status = st.empty()
+            with status_cols[1]:
+                time_status = st.empty()
+            with status_cols[2]:
+                progress_status = st.empty()
+            with status_cols[3]:
+                segment_status = st.empty()
 
             # Check if GPU is available and set device accordingly
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -964,95 +1045,58 @@ class MentorEvaluator:
             # Check cache first
             if cache_key in st.session_state:
                 logger.info("Using cached transcription")
+                if progress_callback:
+                    progress_callback(1.0, "Retrieved from cache")
                 return st.session_state[cache_key]
+
+            if progress_callback:
+                progress_callback(0.2, "Initializing model...", "Setting up transcription environment")
 
             # Initialize model with optimized settings
             model = WhisperModel(
-                "small",  # Use smaller model for faster processing
+                "small",
                 device=device,
                 compute_type=compute_type,
                 download_root=self.model_cache_dir,
                 local_files_only=False,
-                cpu_threads=4,  # Increase CPU threads for parallel processing
-                num_workers=2   # Add workers for data loading
+                cpu_threads=4,
+                num_workers=2
             )
 
             if progress_callback:
-                progress_callback(0.2, "Starting transcription...")
+                progress_callback(0.3, "Analyzing audio file...", "Calculating total duration")
 
             # Get audio duration for progress calculation
             audio_info = sf.info(audio_path)
             total_duration = audio_info.duration
 
-            # First pass to count total segments
+            # First pass to count total segments with more aggressive VAD settings
+            if progress_callback:
+                progress_callback(0.4, "Pre-processing audio...", "Detecting speech segments")
+
             segments_preview, _ = model.transcribe(
                 audio_path,
-                beam_size=5,  # Reduced beam size for faster processing
-                word_timestamps=True,
+                beam_size=1,  # Reduced beam size for faster preview
+                word_timestamps=False,  # Disable word timestamps for preview
                 vad_filter=True,
                 vad_parameters=dict(
-                    min_silence_duration_ms=500,  # Increased silence threshold
-                    speech_pad_ms=100
+                    min_silence_duration_ms=1000,  # More aggressive silence detection
+                    speech_pad_ms=50,  # Reduced padding
+                    threshold=0.5  # More lenient threshold
                 )
             )
             total_segments = sum(1 for _ in segments_preview)
 
-            # Create a progress container with detailed metrics
-            progress_container = st.empty()
-            metrics_cols = st.columns([1, 1, 1, 1])
-            
-            def progress_updater(current_segment, segment_start, segment_duration):
-                """Enhanced callback function to update progress with detailed metrics"""
-                progress = min((segment_start + segment_duration) / total_duration, 1.0)
-                progress = 0.2 + (progress * 0.7)  # Scale progress between 20% and 90%
-                
-                if progress_callback:
-                    elapsed_time = time.time() - start_time
-                    time_remaining = ((total_duration - (segment_start + segment_duration)) / 
-                                   (segment_start + segment_duration) * elapsed_time if segment_start > 0 else 0)
-                    
-                    # Update main progress status with batch info
-                    batch_info = f"Batch {current_segment}/{total_segments}"
-                    progress_callback(progress, "Transcribing Audio", batch_info)
-                    
-                    # Update detailed metrics
-                    with progress_container:
-                        with metrics_cols[0]:
-                            st.markdown(f"""
-                            <div class="metric-box batch">
-                                🎯 <b>Current Batch:</b><br/>
-                                {current_segment}/{total_segments}
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with metrics_cols[1]:
-                            st.markdown(f"""
-                            <div class="metric-box time">
-                                ⏱️ <b>Time Left:</b><br/>
-                                {int(time_remaining)}s
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with metrics_cols[2]:
-                            st.markdown(f"""
-                            <div class="metric-box progress">
-                                📊 <b>Overall:</b><br/>
-                                {progress:.1%}
-                            </div>
-                            """, unsafe_allow_html=True)
-                        
-                        with metrics_cols[3]:
-                            st.markdown(f"""
-                            <div class="metric-box segment">
-                                🔍 <b>Current Time:</b><br/>
-                                {int(segment_start)}s - {int(segment_start + segment_duration)}s
-                            </div>
-                            """, unsafe_allow_html=True)
+            if progress_callback:
+                progress_callback(0.5, f"Found {total_segments} segments to process", 
+                                f"Total audio duration: {int(total_duration)} seconds")
 
             # Start timing for ETA calculation
             start_time = time.time()
+            last_update_time = start_time
+            update_interval = 0.5  # Update UI every 0.5 seconds
 
-            # Transcribe with optimized settings for faster-whisper
+            # Transcribe with optimized settings
             segments, _ = model.transcribe(
                 audio_path,
                 beam_size=5,
@@ -1060,18 +1104,48 @@ class MentorEvaluator:
                 vad_filter=True,
                 vad_parameters=dict(
                     min_silence_duration_ms=500,
-                    speech_pad_ms=100
+                    speech_pad_ms=100,
+                    threshold=0.3
                 )
             )
 
-            # Process segments and update progress
+            # Process segments and combine transcript
             transcript_parts = []
             for i, segment in enumerate(segments, 1):
                 transcript_parts.append(segment.text)
-                progress_updater(i, segment.start, segment.end - segment.start)
+                
+                # Update progress manually
+                current_time = time.time()
+                if current_time - last_update_time >= update_interval:
+                    progress = min(i / total_segments, 1.0)
+                    progress = 0.5 + (progress * 0.4)  # Scale progress between 50% and 90%
+                    
+                    elapsed_time = current_time - start_time
+                    if progress > 0:
+                        estimated_total = elapsed_time / progress
+                        remaining_time = estimated_total - elapsed_time
+                    else:
+                        remaining_time = 0
 
-            # Clean up progress display
-            progress_container.empty()
+                    # Update status columns with detailed metrics
+                    batch_status.markdown(f"🎯 Batch: {i}/{total_segments}")
+                    time_status.markdown(f"⏱️ Time: {int(segment.start)}s/{int(total_duration)}s")
+                    progress_status.markdown(f"📊 Progress: {progress * 100:.1f}%")
+                    segment_status.markdown(f"⌛ ETA: {int(remaining_time)}s")
+
+                    if progress_callback:
+                        progress_callback(
+                            progress,
+                            f"Transcribing: {int(progress * 100)}% complete",
+                            f"Processing segment {i} of {total_segments}"
+                        )
+                    
+                    last_update_time = current_time
+
+            # Clean up status displays
+            for col in status_cols:
+                with col:
+                    st.empty()
 
             # Combine segments into final transcript
             transcript = ' '.join(transcript_parts)
@@ -1080,12 +1154,14 @@ class MentorEvaluator:
             st.session_state[cache_key] = transcript
 
             if progress_callback:
-                progress_callback(1.0, "Transcription complete!")
+                progress_callback(1.0, "Transcription complete!", f"Processed {total_segments} segments")
 
             return transcript
 
         except Exception as e:
             logger.error(f"Error in transcription: {e}")
+            if progress_callback:
+                progress_callback(1.0, "Error in transcription", str(e))
             raise
 
     def _merge_transcripts(self, transcripts: List[str]) -> str:
@@ -1446,17 +1522,22 @@ def display_evaluation(evaluation: Dict[str, Any]):
             st.header("Teaching Analysis")
             
             teaching_data = evaluation.get("teaching", {})
+            content_analyzer = ContentAnalyzer(st.secrets["OPENAI_API_KEY"])
             
-            # Display Concept Assessment with improved styling
+            # Display Concept Assessment with AI-generated suggestions
             with st.expander("📚 Concept Assessment", expanded=True):
                 concept_data = teaching_data.get("Concept Assessment", {})
                 
-                # Create columns for better organization
                 for category, details in concept_data.items():
                     score = details.get("Score", 0)
                     citations = details.get("Citations", [])
                     
-                    # Create a styled card for each category
+                    # Get AI-generated suggestions if score is 0
+                    suggestions = []
+                    if score == 0:
+                        suggestions = content_analyzer.generate_suggestions(category, citations)
+                    
+                    # Create suggestions based on score and category
                     st.markdown(f"""
                         <div class="teaching-card">
                             <div class="teaching-header">
@@ -1468,7 +1549,7 @@ def display_evaluation(evaluation: Dict[str, Any]):
                             <div class="citations-container">
                     """, unsafe_allow_html=True)
                     
-                    # Display citations with improved formatting
+                    # Display citations
                     for citation in citations:
                         st.markdown(f"""
                             <div class="citation-box">
@@ -1476,10 +1557,24 @@ def display_evaluation(evaluation: Dict[str, Any]):
                             </div>
                         """, unsafe_allow_html=True)
                     
+                    # Display AI-generated suggestions if score is 0
+                    if score == 0 and suggestions:
+                        st.markdown("""
+                            <div class="suggestions-box">
+                                <h4>🎯 Suggestions for Improvement:</h4>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        for suggestion in suggestions:
+                            st.markdown(f"""
+                                <div class="suggestion-item">
+                                    • {suggestion}
+                                </div>
+                            """, unsafe_allow_html=True)
+                    
                     st.markdown("</div></div>", unsafe_allow_html=True)
                     st.markdown("---")
             
-            # Display Code Assessment with similar styling
+            # Display Code Assessment with AI-generated suggestions
             with st.expander("💻 Code Assessment", expanded=True):
                 code_data = teaching_data.get("Code Assessment", {})
                 
@@ -1487,6 +1582,12 @@ def display_evaluation(evaluation: Dict[str, Any]):
                     score = details.get("Score", 0)
                     citations = details.get("Citations", [])
                     
+                    # Get AI-generated suggestions if score is 0
+                    suggestions = []
+                    if score == 0:
+                        suggestions = content_analyzer.generate_suggestions(category, citations)
+                    
+                    # Create suggestions based on score and category
                     st.markdown(f"""
                         <div class="teaching-card">
                             <div class="teaching-header">
@@ -1504,6 +1605,20 @@ def display_evaluation(evaluation: Dict[str, Any]):
                                 <i class="citation-text">{citation}</i>
                             </div>
                         """, unsafe_allow_html=True)
+                    
+                    # Display AI-generated suggestions if score is 0
+                    if score == 0 and suggestions:
+                        st.markdown("""
+                            <div class="suggestions-box">
+                                <h4>🎯Suggestions for Improvement:</h4>
+                            </div>
+                        """, unsafe_allow_html=True)
+                        for suggestion in suggestions:
+                            st.markdown(f"""
+                                <div class="suggestion-item">
+                                    • {suggestion}
+                                </div>
+                            """, unsafe_allow_html=True)
                     
                     st.markdown("</div></div>", unsafe_allow_html=True)
                     st.markdown("---")
@@ -1522,24 +1637,31 @@ def display_evaluation(evaluation: Dict[str, Any]):
                 st.markdown(recommendations["summary"])
                 st.markdown("</div></div>", unsafe_allow_html=True)
             
-            # Display improvements with categorization
+            # Display improvements using categories from content analysis
             st.markdown("<h4>💡 Areas for Improvement</h4>", unsafe_allow_html=True)
             improvements = recommendations.get("improvements", [])
             
             if isinstance(improvements, list):
-                # Categorize improvements
+                # Use predefined categories
                 categories = {
                     "🗣️ Communication": [],
                     "📚 Teaching": [],
                     "💻 Technical": []
                 }
                 
+                # Each improvement should now come with a category from the content analysis
                 for improvement in improvements:
-                    if any(keyword in improvement.lower() for keyword in ["pace", "speed", "tone", "volume", "pause", "filler"]):
-                        categories["🗣️ Communication"].append(improvement)
-                    elif any(keyword in improvement.lower() for keyword in ["explain", "concept", "example", "structure", "engagement"]):
-                        categories["📚 Teaching"].append(improvement)
+                    if isinstance(improvement, dict):
+                        category = improvement.get("category", "💻 Technical")  # Default to Technical if no category
+                        message = improvement.get("message", str(improvement))
+                        if "COMMUNICATION" in category.upper():
+                            categories["🗣️ Communication"].append(message)
+                        elif "TEACHING" in category.upper():
+                            categories["📚 Teaching"].append(message)
+                        elif "TECHNICAL" in category.upper():
+                            categories["💻 Technical"].append(message)
                     else:
+                        # Handle legacy format or plain strings
                         categories["💻 Technical"].append(improvement)
                 
                 # Display categorized improvements in columns
@@ -1954,6 +2076,39 @@ def display_evaluation(evaluation: Dict[str, Any]):
             border-left: 2px solid #17a2b8;
         }
         </style>
+        
+        <style>
+        /* ... existing styles ... */
+        
+        .suggestions-box {
+            background-color: #f8f9fa;
+            padding: 10px 15px;
+            margin-top: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #ffc107;
+        }
+        
+        .suggestions-box h4 {
+            color: #856404;
+            margin: 0;
+            padding: 5px 0;
+        }
+        
+        .suggestion-item {
+            padding: 5px 15px;
+            color: #666;
+            border-left: 2px solid #ffc107;
+            margin: 5px 0;
+            background-color: #fff;
+            border-radius: 0 4px 4px 0;
+        }
+        
+        .suggestion-item:hover {
+            background-color: #fff9e6;
+            transform: translateX(5px);
+            transition: all 0.2s ease;
+        }
+        </style>
     """, unsafe_allow_html=True)
 
 def check_dependencies() -> List[str]:
@@ -2058,8 +2213,15 @@ def generate_pdf_report(evaluation_data: Dict[str, Any]) -> bytes:
         
         if "improvements" in recommendations:
             story.append(Paragraph("Areas for Improvement:", styles['Heading3']))
-            for improvement in recommendations["improvements"]:
-                story.append(Paragraph("• " + improvement, styles['Normal']))
+            improvements = recommendations["improvements"]
+            for improvement in improvements:
+                # Handle both string and dictionary improvement formats
+                if isinstance(improvement, dict):
+                    message = improvement.get("message", "")
+                    category = improvement.get("category", "")
+                    story.append(Paragraph(f"• [{category}] {message}", styles['Normal']))
+                else:
+                    story.append(Paragraph(f"• {improvement}", styles['Normal']))
         
         # Build PDF
         doc.build(story)
